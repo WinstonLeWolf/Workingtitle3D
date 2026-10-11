@@ -145,10 +145,10 @@ const partList = h('div', { class: 'parts' });
 const stepCard = h('div');
 const inspector = h('div', { class: 'inspector', style: 'display:none' });
 // one panel on the right, full height, tabs at the very top, each tab scrolls:
-// Parts (the parts list, then the tool step and the selected part's options) and New parts (shapes)
-const panes = { parts: h('div', { class: 'pane' }, card('Parts', partList), stepCard, inspector),
-  shapes: h('div', { class: 'pane', style: 'display:none' }, card('Shapes', shapeGrid)) };
-const tabs = seg([['parts', 'Parts'], ['shapes', 'New parts']], 'parts', v => showTab(v));
+// Shape tools (the shapes to add) and Parts (the parts list, the tool step, the selected part's options)
+const panes = { shapes: h('div', { class: 'pane', style: 'display:none' }, card('Shapes', shapeGrid)),
+  parts: h('div', { class: 'pane' }, card('Parts', partList), stepCard) };
+const tabs = seg([['shapes', 'Shape tools'], ['parts', 'Parts']], 'parts', v => showTab(v));
 tabs.classList.add('tabs');
 function showTab(v) { tabs.set(v); for (const [k, el] of Object.entries(panes)) el.style.display = k === v ? '' : 'none'; }
 const aside = h('aside', {}, tabs, panes.parts, panes.shapes);
@@ -251,16 +251,38 @@ function addShape(kind) {
   status(`Added ${doc.top(id).name}.`);
 }
 
+// The parts list. A single selected part shows its options right under its row (the arrow
+// folds them away); several selected show theirs under the list. The options element is
+// never taken out while it is open, so typing in it is not interrupted by a redraw.
+let optsFolded = false;
 function renderParts() {
-  partList.replaceChildren(...doc.parts.map(p => {
+  for (const c of [...partList.children]) if (c !== inspector) c.remove();
+  if (!partList.contains(inspector)) partList.append(inspector);
+  const one = sel.length === 1 ? sel[0] : null;
+  const rows = doc.parts.map(p => {
     const on = sel.includes(p.id);
-    const tags = [p.hole ? 'hole' : 'solid', p.hidden ? 'hidden' : '', p.locked ? 'locked' : '', p.kind === 'group' ? `${p.children.length} parts` : ''].filter(Boolean).join(' · ');
-    const row = h('button', { type: 'button', class: 'prow' + (on ? ' on' : '') + (p.hidden ? ' dim' : ''), onclick: e => {
-      if (e.shiftKey || e.ctrlKey) setSel(on ? sel.filter(x => x !== p.id) : [...sel, p.id]); else setSel([p.id]);
-    } }, h('span', { class: 'pn' }, p.name), h('span', { class: 'pt' }, tags));
+    const tags = [p.hole ? 'hole' : 'solid', p.mode === 'intersect' ? 'intersect' : '', p.hidden ? 'hidden' : '', p.locked ? 'locked' : '', p.kind === 'group' ? `${p.children.length} parts` : ''].filter(Boolean).join(' · ');
+    const arrow = p.id === one ? h('span', { class: 'fold', title: optsFolded ? 'Show its options' : 'Fold its options away',
+      onclick: e => { e.stopPropagation(); optsFolded = !optsFolded; renderParts(); renderInspector(); } }, optsFolded ? '▸' : '▾') : null;
+    const row = h('button', { type: 'button', class: 'prow' + (on ? ' on' : '') + (p.hidden ? ' dim' : ''), title: 'Double-click to rename', onclick: e => {
+      if (e.detail === 2 && !e.shiftKey && !e.ctrlKey) return renamePart(p, row);   // the first click may have redrawn the row
+      if (e.shiftKey || e.ctrlKey) setSel(on ? sel.filter(x => x !== p.id) : [...sel, p.id]);
+      else { if (p.id !== one) optsFolded = false; setSel([p.id]); }
+    } }, h('span', { class: 'pn' }, arrow, p.name), h('span', { class: 'pt' }, tags));
     return row;
-  }));
+  });
+  const at = one ? doc.parts.findIndex(p => p.id === one) + 1 : rows.length;
+  inspector.before(...rows.slice(0, at));
+  inspector.after(...rows.slice(at));
   if (!doc.parts.length) partList.append(h('p', {}, 'No parts yet.'));
+}
+function renamePart(p, row) {
+  const input = h('input', { type: 'text', class: 'name-in', value: p.name, spellcheck: 'false' });
+  const done = ok => { const v = input.value.trim(); input.replaceWith(row); if (ok && v && v !== p.name) doc.update([p.id], `Rename to ${v}`, q => { q.name = v; }); };
+  input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { input.value = p.name; input.blur(); } });
+  input.addEventListener('blur', () => done(true), { once: true });
+  row.replaceWith(input);
+  input.select();
 }
 
 // ---- inspector ----------------------------------------------------------------------------
@@ -268,20 +290,20 @@ let inspectorFor = null;
 // never rebuild under a field being typed in; catch up when focus leaves
 inspector.addEventListener('focusout', () => setTimeout(() => { if (document.activeElement?.tagName !== 'INPUT' || !inspector.contains(document.activeElement)) renderInspector(); }, 0));
 function renderInspector() {
-  if (!sel.length) { inspector.style.display = 'none'; inspectorFor = null; return; }
+  if (!sel.length || (sel.length === 1 && optsFolded)) { inspector.style.display = 'none'; inspectorFor = null; return; }
   const key = sel.join();
   if (inspectorFor === key && inspector.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
   inspectorFor = key;
   inspector.style.display = '';
   if (sel.length > 1) {
     const first = doc.top(sel[0]);
-    inspector.replaceChildren(card(`${sel.length} parts`,
+    inspector.replaceChildren(h('div', { class: 'sub' }, `${sel.length} parts selected`),
       colourPicker(sel.every(id => doc.top(id)?.color === first?.color) ? first?.color : '', hex => {
         const ids = editable();
         if (ids.length) doc.update(ids, `Colour ${ids.length} parts: ${colourName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; });
       }),
       h('div', { class: 'row' }, button('Group', () => groupSel(), { title: 'Ctrl+G' }), button('Intersect', () => groupSel('intersect'), { title: 'Ctrl+I' })),
-      h('div', { class: 'row' }, button('Align', () => status('Align is not built yet.')), button('Delete', () => deleteSel(), { title: 'Delete' }))));
+      h('div', { class: 'row' }, button('Align', () => status('Align is not built yet.')), button('Delete', () => deleteSel(), { title: 'Delete' })));
     return;
   }
   const p = doc.top(sel[0]);
@@ -289,11 +311,7 @@ function renderInspector() {
   const m = meshes.get(p.id);
   const lock = p.locked;
   const upd = (label, fn) => { if (lock) { status(`${p.name} is locked (Ctrl+L).`); return; } doc.update([p.id], label, fn); };
-  const name = h('input', { type: 'text', class: 'name-in', value: p.name, spellcheck: 'false' });
-  name.addEventListener('change', () => { const v = name.value.trim(); if (v && v !== p.name) doc.update([p.id], `Rename to ${v}`, q => { q.name = v; }); });
-  name.addEventListener('keydown', e => { if (e.key === 'Enter') name.blur(); e.stopPropagation(); });
   const body = [
-    h('div', { class: 'row' }, name),
     seg([['solid', 'Solid'], ['hole', 'Hole']], p.hole ? 'hole' : 'solid', v => upd(v === 'hole' ? `${p.name} to hole` : `${p.name} to solid`, q => { q.hole = v === 'hole'; })),
   ];
   if (!p.hole) body.push(colourPicker(p.color, hex => upd(`${p.name} colour: ${colourName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; })));
@@ -345,7 +363,7 @@ function renderInspector() {
     body.push(kv([['size', b ? `${mm(b.max.x - b.min.x)} x ${mm(b.max.y - b.min.y)} x ${mm(b.max.z - b.min.z)}` : '-'], ['volume', `${(m.volume / 1000).toFixed(2)} cm3`], ['triangles', count(m.tris.length / 9)]]));
   }
   if (lock) body.push(h('div', { class: 'note' }, 'Locked: Ctrl+L to unlock.'));
-  inspector.replaceChildren(card(p.kind === 'group' ? `Group${p.mode === 'intersect' ? ' (intersect)' : ''}` : p.kind, ...body));
+  inspector.replaceChildren(...body);
 }
 
 // ---- history view ---------------------------------------------------------------------------

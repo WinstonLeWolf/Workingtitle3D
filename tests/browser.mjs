@@ -78,8 +78,8 @@ try {
     }
     throw new Error('no field ' + label);
   };
-  // shapes live on the New parts tab; come back to Parts, where the options are
-  const addShape = async name => { await click('.tabs button', 'New parts'); await click('.shapes .btn', name); await click('.tabs button', 'Parts'); };
+  // shapes live on the Shape tools tab; come back to Parts, where the options are
+  const addShape = async name => { await click('.tabs button', 'Shape tools'); await click('.shapes .btn', name); await click('.tabs button', 'Parts'); };
   const keys = async (...k) => { for (const x of k) await page.keyboard.down(x); for (const x of k.reverse()) await page.keyboard.up(x); await sleep(150); };
 
   await shot('0-empty');
@@ -165,6 +165,23 @@ try {
   await page.click('.palette .sw[title="Red"]');
   await sleep(300);
   step('colour picked, named in text', (await page.$eval('.inspector .cname', e => e.textContent)) === 'Red');
+
+  // options sit under the selected row; double-click the row renames in place; the arrow folds
+  const under = await page.$eval('.prow.on', r => r.nextElementSibling?.classList.contains('inspector'));
+  await (await page.$('.prow.on')).click({ count: 2 });
+  await page.waitForSelector('.parts > input.name-in');
+  await page.$eval('.parts > input.name-in', i => { i.value = ''; });
+  await page.type('.parts > input.name-in', 'Lid');
+  await page.keyboard.press('Enter');
+  await sleep(400);
+  const renamed = (await parts()).some(t => t.includes('Lid'));
+  await page.click('.prow.on .fold');
+  await sleep(200);
+  const folded = await page.$eval('.inspector', e => e.style.display === 'none');
+  await page.click('.prow.on .fold');
+  await sleep(200);
+  step('options under the row, rename in place, fold', under && renamed && folded, `under ${under}, renamed ${renamed}, folded ${folded}`);
+  await shot('4b-parts-panel');
 
   // arrows follow the view: top view right = +X; right view right = +Y
   const posOf = () => page.$$eval('.inspector .field', fs => fs.filter(f => ['Centre X', 'Centre Y'].includes(f.querySelector('label').textContent)).slice(0, 2).map(f => +f.querySelector('input').value));

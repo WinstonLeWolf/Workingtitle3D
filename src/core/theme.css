@@ -146,7 +146,11 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
   border: 1px solid transparent; border-radius: 3px; color: var(--gray-lt); padding: 3px 6px; cursor: pointer; }
 .prow:hover { background: var(--hex-hover); }
 .prow.on { background: var(--hex-active); border-color: var(--green-dim); color: var(--glow); font-weight: 600; }
-.prow.on .pn::before { content: "\25B8 "; }
+.prow .fold { display: inline-block; width: 16px; margin-left: -2px; cursor: pointer; }
+.prow .fold:hover { color: var(--glow); }
+.parts > .name-in { margin: 0; }
+.parts > .inspector { padding: 2px 2px 8px; }
+.parts > .inspector > .seg:first-child, .parts > .inspector > .sub:first-child { margin-top: 4px; }
 .prow.dim .pn { color: var(--gray); font-style: italic; }
 .prow .pt { color: var(--gray); font-size: 11px; font-weight: 400; white-space: nowrap; }
 .inspector .card { background: var(--panel); }
