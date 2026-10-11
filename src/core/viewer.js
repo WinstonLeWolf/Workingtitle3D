@@ -399,7 +399,7 @@ export class Viewer {
     for (const axis of [0, 1, 2]) {
       const ring = new THREE.Group();
       const band = new THREE.Mesh(new THREE.TorusGeometry(1, 0.008, 6, 128), mk());
-      band.material.opacity = 0.7;
+      band.material.opacity = 0.45;
       band.renderOrder = 19;
       const pick = add(new THREE.TorusGeometry(1, 0.05, 6, 64), { kind: 'rot', axis },
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false }));

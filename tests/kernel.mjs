@@ -72,6 +72,24 @@ for (const kind of Object.keys(SHAPES)) {
   for (let i = 2; i < tris.length; i += 3) if (tris[i] < 0.01) worst = Math.max(worst, Math.abs(tris[i]));
   ok('flatten to one solid', r.watertight && worst === 0, `${describe(r)} ${r.triangles} tris  worst floor z ${worst}`);
 }
+// edge shaper on picked walls: the front edge only, then everything but the front
+{
+  const plate = part('box', { x: 40, y: 20, z: 5 });
+  const front = { segs: [[-20, -10, 20, -10]] };
+  const step = (edges, sel) => ({ ...plate, ops: [{ tool: 'edgeshaper', params: { kind: 'fillet', face: 'top', width: 2, height: 2, start: null, edges }, sel }] });
+  const all = report((await partMesh({ ...plate, ops: [{ tool: 'edgeshaper', params: { kind: 'fillet', face: 'top', width: 2, height: 2, start: null } }] }, ctx)).tris);
+  const only = report((await partMesh(step('only', front), ctx)).tris);
+  const except = report((await partMesh(step('except', front), ctx)).tris);
+  const strip = 4 * (1 - Math.PI / 4) * 40;   // a 2 mm fillet along 40 mm takes this much away
+  ok('edge shaper: front edge only', only.watertight && Math.abs(4000 - only.volume - strip) < 0.2, `${describe(only)} took ${(4000 - only.volume).toFixed(2)} mm3, a straight 40 mm fillet ${strip.toFixed(2)}`);
+  ok('edge shaper: all but the front', except.watertight && except.volume > all.volume && except.volume < only.volume,
+    `${describe(except)} vol ${except.volume.toFixed(1)} (all ${all.volume.toFixed(1)}, front only ${only.volume.toFixed(1)})`);
+  // every wall picked matches the ring method
+  const every = { segs: [[-20, -10, 20, -10], [20, -10, 20, 10], [20, 10, -20, 10], [-20, 10, -20, -10]] };
+  const same = report((await partMesh(step('only', every), ctx)).tris);
+  ok('edge shaper: all picked = ring method', same.watertight && Math.abs(same.volume - all.volume) < 0.2, `${same.volume.toFixed(2)} vs ${all.volume.toFixed(2)}`);
+}
+
 // two boxes touching along one edge: the export refuses it and says where, in plain words
 {
   const tris = await flatten([part('box', { x: 10, y: 10, z: 10 }), part('box', { x: 10, y: 10, z: 10 }, { xform: { pos: [10, 10, 0], rot: [0, 0, 0], scale: [1, 1, 1] } })], ctx);

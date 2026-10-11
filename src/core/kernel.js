@@ -178,7 +178,8 @@ export async function local(part, ctx) {
     const tool = ctx.tools[op.tool];
     if (!tool) throw new ToolError(`No tool called ${op.tool}.`);
     const tris = toTris(man);
-    const out = await tool.run(tris, op.params, { selection: resolveFace(tris, op.sel), progress: ctx.progress || (() => {}) });
+    const sel = op.sel?.segs ? op.sel : resolveFace(tris, op.sel);   // picked edges travel as plan segments
+    const out = await tool.run(tris, op.params, { selection: sel, progress: ctx.progress || (() => {}), kernel: { M, toManifold, toTris } });
     const next = toManifold(out.tris || out);
     man.delete();
     man = next;

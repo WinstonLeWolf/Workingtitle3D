@@ -303,6 +303,29 @@ try {
   step('Z ring turns in 15 degree steps', Math.abs(Math.abs(rz) - 90) < 1e-3, `rotation Z ${rz}`);
   await shot('5c-handles');
 
+  // edge shaper on one picked wall: a fresh 20 mm box, fillet the top edge of its front wall only
+  await addShape('Box');
+  await sleep(600);
+  const bid = await page.evaluate(() => document.getElementById('view').viewer.handleFor);
+  await click('.inspector .btn', 'Edge shaper');
+  await click('aside .seg button', 'Picked');
+  await click('.btn', 'Front'); await sleep(400);
+  const fp = await page.evaluate(id => {
+    const v = document.getElementById('view').viewer, o = v.objs.get(id), b = o.mesh.geometry.boundingBox;
+    o.group.updateMatrixWorld();
+    const p = o.mesh.position.clone().set((b.min.x + b.max.x) / 2, b.min.y, (b.min.z + b.max.z) / 2).applyMatrix4(o.group.matrixWorld).project(v.camera);
+    const r = v.renderer.domElement.getBoundingClientRect();
+    return [r.left + ((p.x + 1) / 2) * r.width, r.top + ((1 - p.y) / 2) * r.height];
+  }, bid);
+  await page.mouse.click(...fp);
+  await sleep(300);
+  const note = await page.$$eval('aside .note', ns => ns.map(n => n.textContent).find(t => /picked/.test(t)) || '');
+  await click('aside .btn', 'Apply');
+  await waitStatus(/added to|ERROR/);
+  const vf = await vol();
+  await keys('f'); await page.evaluate(() => document.getElementById('view').viewer.view('iso', [document.getElementById('view').viewer.handleFor].filter(Boolean))); await shot('5d-picked-edge');
+  step('edge shaper: one picked wall', /1 wall picked/.test(note) && vf < 8 && vf > 7.97, `${note.slice(0, 20)} | vol ${vf} cm3`);
+
   // projects: home folder picked once, project named, reopened by itself after a reload.
   // The picker is stood in by the browser's private storage, so no dialog is needed. That
   // storage is refused to file:// pages, so this part loads the same page from 127.0.0.1.

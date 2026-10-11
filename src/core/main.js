@@ -426,6 +426,7 @@ function keepPast() {
 // ---- selection and editing ----------------------------------------------------------------------
 viewer.onPick = (id, face, e) => {
   if (step && id === step.partId && step.tool.needsFace) { pickStepFace(face); return; }
+  if (step && id === step.partId && step.tool.pickWalls?.(step.params)) { pickWall(face); return; }
   if (!id) { if (!e.shiftKey) setSel([]); return; }
   if (e.shiftKey) setSel(sel.includes(id) ? sel.filter(x => x !== id) : [...sel, id]);
   else setSel([id]);
@@ -639,7 +640,7 @@ function startStep(t, partId) {
     set(k, v) { step.params[k] = v; stepChanged(); },
     model: () => lb && { bounds: lb },
     selection: () => step?.face,
-    clearSelection: () => { step.face = null; viewer.setFacePick(null); stepChanged(); },
+    clearSelection: () => { step.face = null; step.walls = []; viewer.setFacePick(null); stepChanged(); },
   };
   step.ui = { body, statusEl, prog, applyBtn, hooks: t.panel(body, api) || {} };
   status(t.needsFace ? `${t.title}: click a face on ${p.name} if the step needs one.` : `${t.title}: set it up, then Preview or Apply.`);
@@ -663,7 +664,8 @@ function stepChanged() {
 }
 function stepOp() {
   const op = { tool: step.tool.id, params: structuredClone(step.params) };
-  if (step.face) op.sel = { normal: step.face.normal, d: step.face.d, point: step.face.point };
+  if (step.face?.segs) op.sel = { segs: step.face.segs };
+  else if (step.face) op.sel = { normal: step.face.normal, d: step.face.d, point: step.face.point };
   return op;
 }
 async function previewStep() {
@@ -716,6 +718,61 @@ function pickStepFace(face) {
   viewer.setFacePick(step.partId, region.tris);
   status(`Face picked: ${mm(region.area)} mm2.`);
   stepChanged();
+}
+
+/** Picking side walls (several): a click adds the wall under it, or takes it away if it is
+ *  already picked. A wall is one flat side, or a whole smooth round side. What the step keeps
+ *  is each wall's foot on the bottom face, as plan segments. */
+function pickWall(face) {
+  const m = meshes.get(step.partId);
+  if (!m || face < 0) return;
+  step.walls = step.walls || [];
+  const had = step.walls.findIndex(wl => wl.tris.includes(face));
+  if (had >= 0) step.walls.splice(had, 1);
+  else {
+    const w = wallRegion(m.tris, face);
+    if (!w) { status('That is not a side wall. Click the side of the part whose top or bottom edge to pick.'); return; }
+    step.walls.push(w);
+  }
+  const all = step.walls.flatMap(wl => wl.tris);
+  step.face = step.walls.length ? { segs: step.walls.flatMap(wl => wl.segs), walls: step.walls.length } : null;
+  viewer.setFacePick(step.partId, all);
+  status(`${step.walls.length} wall${step.walls.length === 1 ? '' : 's'} picked. Click a wall again to drop it.`);
+  stepChanged();
+}
+
+function wallRegion(t, seed) {
+  const nrm = f => {
+    const i = f * 9;
+    const ux = t[i + 3] - t[i], uy = t[i + 4] - t[i + 1], uz = t[i + 5] - t[i + 2];
+    const vx = t[i + 6] - t[i], vy = t[i + 7] - t[i + 1], vz = t[i + 8] - t[i + 2];
+    const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx], l = Math.hypot(...n) || 1;
+    return n.map(v => v / l);
+  };
+  const upright = f => Math.abs(nrm(f)[2]) < 1e-3;
+  if (!upright(seed)) return null;
+  const { idx } = weld(t);
+  const byVert = new Map();
+  for (let f = 0; f < t.length / 9; f++) for (let k = 0; k < 3; k++) { const v = idx[f * 3 + k]; (byVert.get(v) || byVert.set(v, []).get(v)).push(f); }
+  const smooth = Math.cos((30 * Math.PI) / 180);   // round sides: neighbouring facets turn less than this
+  const seen = new Set([seed]), stack = [seed], out = [];
+  while (stack.length) {
+    const f = stack.pop(), nf = nrm(f);
+    out.push(f);
+    for (let k = 0; k < 3; k++) for (const g of byVert.get(idx[f * 3 + k])) {
+      if (seen.has(g) || !upright(g)) continue;
+      const ng = nrm(g);
+      if (ng[0] * nf[0] + ng[1] * nf[1] < smooth) continue;
+      seen.add(g); stack.push(g);
+    }
+  }
+  // feet: triangle edges lying on the bottom face
+  const z0 = localBounds(t).lo[2], segs = [];
+  for (const f of out) for (let k = 0; k < 3; k++) {
+    const a = f * 9 + k * 3, b = f * 9 + ((k + 1) % 3) * 3;
+    if (Math.abs(t[a + 2] - z0) < 1e-3 && Math.abs(t[b + 2] - z0) < 1e-3) segs.push([t[a], t[a + 1], t[b], t[b + 1]].map(v => +v.toFixed(5)));
+  }
+  return segs.length ? { tris: out, segs } : null;
 }
 
 /** The flat region round a triangle, in the part's own frame. */
