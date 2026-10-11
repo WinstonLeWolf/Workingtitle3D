@@ -145,12 +145,23 @@ const partList = h('div', { class: 'parts' });
 const stepCard = h('div');
 const inspector = h('div', { class: 'inspector', style: 'display:none' });
 // one panel on the right, full height, tabs at the very top, each tab scrolls:
-// Shape tools (the shapes to add) and Parts (the parts list, the tool step, the selected part's options)
-const panes = { shapes: h('div', { class: 'pane', style: 'display:none' }, card('Shapes', shapeGrid)),
+// Shape tools (the shapes to add, then the selected part's options, so a new part is edited
+// without changing tab) and Parts (the parts list with the options under the selected row,
+// the tool step). The one options element moves to whichever tab is showing.
+const shapeOpts = h('div', { class: 'card shapeopts', style: 'display:none' });
+const panes = { shapes: h('div', { class: 'pane', style: 'display:none' }, card('Shapes', shapeGrid), shapeOpts),
   parts: h('div', { class: 'pane' }, card('Parts', partList), stepCard) };
+let curTab = 'parts';
 const tabs = seg([['shapes', 'Shape tools'], ['parts', 'Parts']], 'parts', v => showTab(v));
 tabs.classList.add('tabs');
-function showTab(v) { tabs.set(v); for (const [k, el] of Object.entries(panes)) el.style.display = k === v ? '' : 'none'; }
+function showTab(v) {
+  if (v === curTab) return;
+  curTab = v;
+  tabs.set(v);
+  for (const [k, el] of Object.entries(panes)) el.style.display = k === v ? '' : 'none';
+  renderParts();
+  renderInspector();
+}
 const aside = h('aside', {}, tabs, panes.parts, panes.shapes);
 
 const view = h('div', { id: 'view' });
@@ -279,7 +290,8 @@ function addShape(kind) {
 let optsFolded = false;
 function renderParts() {
   for (const c of [...partList.children]) if (c !== inspector) c.remove();
-  if (!partList.contains(inspector)) partList.append(inspector);
+  const home = curTab === 'shapes' ? shapeOpts : partList;
+  if (inspector.parentNode !== home) home.append(inspector);
   const one = sel.length === 1 ? sel[0] : null;
   const rows = doc.parts.map(p => {
     const on = sel.includes(p.id);
@@ -293,9 +305,12 @@ function renderParts() {
     } }, h('span', { class: 'pn' }, arrow, p.name), h('span', { class: 'pt' }, tags));
     return row;
   });
-  const at = one ? doc.parts.findIndex(p => p.id === one) + 1 : rows.length;
-  inspector.before(...rows.slice(0, at));
-  inspector.after(...rows.slice(at));
+  if (home !== partList) partList.append(...rows);
+  else {
+    const at = one ? doc.parts.findIndex(p => p.id === one) + 1 : rows.length;
+    inspector.before(...rows.slice(0, at));
+    inspector.after(...rows.slice(at));
+  }
   if (!doc.parts.length) partList.append(h('p', {}, 'No parts yet.'));
 }
 function renamePart(p, row) {
@@ -315,7 +330,10 @@ inspector.addEventListener('focusout', () => setTimeout(() => { if (document.act
  *  placement of its current mesh that looks the same). */
 function renderInspector(live = null) {
   viewer.setHandles(sel.length === 1 && !step && !past && !doc.top(sel[0])?.locked ? sel[0] : null);
-  if (!sel.length || (sel.length === 1 && optsFolded)) { inspector.style.display = 'none'; inspectorFor = null; return; }
+  // the fold arrow lives on the Parts tab; Shape tools always shows the options
+  const hide = !sel.length || (sel.length === 1 && optsFolded && curTab === 'parts');
+  shapeOpts.style.display = hide || curTab !== 'shapes' ? 'none' : '';
+  if (hide) { inspector.style.display = 'none'; inspectorFor = null; return; }
   const key = sel.join();
   if (!live && inspectorFor === key && inspector.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
   inspectorFor = key;

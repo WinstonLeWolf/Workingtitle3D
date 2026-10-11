@@ -386,6 +386,17 @@ try {
   step('rename the project', /Renamed case/.test(after.label) && after.names.includes('Renamed case') && !after.names.includes('Test case') && /Sphere/.test(after.lastStep),
     `${rn.slice(0, 50)} | ${after.names.join(', ')} | ${after.label}`);
 
+  // a shape added on Shape tools is edited there, no tab change; Parts takes the options back
+  await click('.tabs button', 'Shape tools');
+  await click('.shapes .btn', 'Cylinder');
+  await sleep(800);
+  await shot('shape-tab-opts');
+  const onShapes = await page.evaluate(() => { const o = document.querySelector('.shapeopts');
+    return o.style.display !== 'none' && !!o.querySelector('.inspector') && /Diameter/.test(o.textContent) && !document.querySelector('.parts .inspector'); });
+  await click('.tabs button', 'Parts');
+  const onParts = await page.evaluate(() => !!document.querySelector('.parts > .inspector') && document.querySelector('.parts > .inspector').style.display !== 'none');
+  step('options under Shape tools after adding', onShapes && onParts, `${onShapes} ${onParts}`);
+
   // a driver reset (resume from sleep) loses the GL context: say so, then redraw on restore
   await page.evaluate(() => { window._lc = document.querySelector('#view canvas').getContext('webgl2').getExtension('WEBGL_lose_context'); window._lc.loseContext(); });
   const lostMsg = await waitStatus(/graphics driver reset/);
