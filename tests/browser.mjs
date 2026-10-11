@@ -271,6 +271,38 @@ try {
   await sleep(400);
   step('D drops the rotated part onto the plate', Math.abs(await fv('Bottom Z')) < 1e-3, `bottom Z ${await fv('Bottom Z')}`);
 
+  // handles on a fresh 20 mm box, from the top: drag the +X cube, the lift cone, the Z ring
+  await addShape('Box');
+  await sleep(600);
+  await click('.btn', 'Top'); await sleep(400);
+  const scr = (what) => page.evaluate(w => {
+    const v = document.getElementById('view').viewer;
+    v.updateHandles();
+    const r = v.renderer.domElement.getBoundingClientRect();
+    const to = p => { const q = p.clone().project(v.camera); return [r.left + ((q.x + 1) / 2) * r.width, r.top + ((1 - q.y) / 2) * r.height]; };
+    if (w === 'x') return to(v.hparts[0].getWorldPosition(v.hparts[0].position.clone()));
+    if (w === 'lift') return to(v.hparts[5].getWorldPosition(v.hparts[5].position.clone()));
+    const ring = v.handles.children.find(c => c.userData.axis === 2), m = ring.position, R = ring.userData.radius;
+    return [to(m.clone().setX(m.x + R)), to(m.clone().setY(m.y + R)), to(m.clone().setX(m.x + R * 0.7071).setY(m.y + R * 0.7071))];
+  }, what);
+  const dragPath = async pts => { await page.mouse.move(...pts[0]); await page.mouse.down(); for (const p of pts.slice(1)) { await page.mouse.move(...p, { steps: 6 }); await sleep(30); } await page.mouse.up(); await sleep(700); };
+  const w0 = await fv('Width'), cx0b = await fv('Centre X');
+  const hx = await scr('x');
+  await dragPath([hx, [hx[0] + 20, hx[1]], [hx[0] + 60, hx[1]]]);
+  const w1 = await fv('Width'), cx1b = await fv('Centre X');
+  step('size handle: wider, far side stays', w1 > w0 && Number.isInteger(w1) && Math.abs((cx1b - w1 / 2) - (cx0b - w0 / 2)) < 1e-3, `width ${w0} -> ${w1}, left side ${cx0b - w0 / 2} -> ${cx1b - w1 / 2}`);
+  await click('.btn', 'Front'); await sleep(400);
+  const hl = await scr('lift');
+  await dragPath([hl, [hl[0], hl[1] - 20], [hl[0], hl[1] - 50]]);
+  const zl = await fv('Bottom Z');
+  step('lift cone raises the part', zl > 0 && Number.isInteger(zl), `bottom Z ${zl}`);
+  await click('.btn', 'Top'); await sleep(400);
+  const [r0, r90, r45] = await scr('ring');
+  await dragPath([r0, r45, r90]);
+  const rz = await fv('Z');
+  step('Z ring turns in 15 degree steps', Math.abs(Math.abs(rz) - 90) < 1e-3, `rotation Z ${rz}`);
+  await shot('5c-handles');
+
   // projects: home folder picked once, project named, reopened by itself after a reload.
   // The picker is stood in by the browser's private storage, so no dialog is needed. That
   // storage is refused to file:// pages, so this part loads the same page from 127.0.0.1.

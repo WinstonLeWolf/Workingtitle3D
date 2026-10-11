@@ -4,7 +4,7 @@ import workerSrc from 'virtual:worker-src';
 import tools from 'virtual:tools-ui';
 import { Viewer } from './viewer.js';
 import * as ui from './ui.js';
-import { Vector3, Box3 } from 'three';
+import { Vector3, Box3, Quaternion, Euler } from 'three';
 import { Doc, shapeKey, IDENT, matrix } from './doc.js';
 import { Project } from './project.js';
 import * as folders from './folders.js';
@@ -180,6 +180,7 @@ view.append(header, dropHint, views, cut, moveCol, pastBanner, h('footer', {}, s
 app.append(view, aside);
 
 const viewer = new Viewer(view);
+view.viewer = viewer;   // for the browser test
 
 function status(text, error = false) {
   statusMsg.textContent = text;
@@ -289,10 +290,13 @@ function renamePart(p, row) {
 let inspectorFor = null;
 // never rebuild under a field being typed in; catch up when focus leaves
 inspector.addEventListener('focusout', () => setTimeout(() => { if (document.activeElement?.tagName !== 'INPUT' || !inspector.contains(document.activeElement)) renderInspector(); }, 0));
-function renderInspector() {
+/** live: the part as a handle drag would leave it, shown while dragging (with `view`, the
+ *  placement of its current mesh that looks the same). */
+function renderInspector(live = null) {
+  viewer.setHandles(sel.length === 1 && !step && !past && !doc.top(sel[0])?.locked ? sel[0] : null);
   if (!sel.length || (sel.length === 1 && optsFolded)) { inspector.style.display = 'none'; inspectorFor = null; return; }
   const key = sel.join();
-  if (inspectorFor === key && inspector.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
+  if (!live && inspectorFor === key && inspector.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
   inspectorFor = key;
   inspector.style.display = '';
   if (sel.length > 1) {
@@ -306,7 +310,7 @@ function renderInspector() {
       h('div', { class: 'row' }, button('Align', () => status('Align is not built yet.')), button('Delete', () => deleteSel(), { title: 'Delete' })));
     return;
   }
-  const p = doc.top(sel[0]);
+  const p = live || doc.top(sel[0]);
   if (!p) return;
   const m = meshes.get(p.id);
   const lock = p.locked;
@@ -336,7 +340,7 @@ function renderInspector() {
     }
   }
   // where the part really is: its middle in X and Y, its lowest point in Z (0 = on the plate)
-  const wb = worldBox(p);
+  const wb = worldBox(p, p.view || p.xform);
   body.push(h('div', { class: 'sub' }, 'Position'));
   if (wb) {
     const at = [(wb.min.x + wb.max.x) / 2, (wb.min.y + wb.max.y) / 2, wb.min.z];
@@ -346,7 +350,7 @@ function renderInspector() {
   body.push(h('div', { class: 'sub' }, 'Rotation (about its middle)'));
   ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.rot[i], 'deg',
     v => upd(`Rotate ${p.name}`, q => { const r = [...q.xform.rot]; r[i] = v; q.xform = rotated(q, r); }), { step: 15, lazy: true, digits: 3 })));
-  if (!p.params) {
+  if (!p.params || p.xform.scale.some(v => v !== 1)) {
     body.push(h('div', { class: 'sub' }, 'Scale'));
     ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.scale[i] * 100, '%', v => upd(`Scale ${p.name}`, q => { q.xform.scale[i] = v / 100; }), { min: 0.1, max: 100000, step: 10, lazy: true, digits: 3 })));
   }
@@ -389,6 +393,7 @@ async function scrubTo(k) {
   const ids = new Set(doc.idsIn(doc.top(id)));
   const shown = doc.partsAt(t).filter(q => !q.hidden && doc.idsIn(q).some(x => ids.has(x)));
   past = { id, k, t, ownState: shown.find(q => q.id === id) || null };
+  viewer.setHandles(null);
   pastLabel(k);
   try {
     await sendBlobs();
@@ -403,6 +408,7 @@ async function scrubTo(k) {
 function endPast(redraw = true) {
   if (!past && !viewer.past) return;
   past = null;
+  viewer.setHandles(sel.length === 1 && !step && !doc.top(sel[0])?.locked ? sel[0] : null);
   pastSeq++;
   pastBanner.style.display = 'none';
   viewer.showPast(null);
@@ -456,6 +462,83 @@ viewer.onDragEnd = () => {
     p.xform.pos = [+(s[0] + d.d[0]).toFixed(6), +(s[1] + d.d[1]).toFixed(6), s[2]];
   });
 };
+
+// ---- handles: size, lift, turn -----------------------------------------------------------------
+// Size: the opposite side stays where it is and the new size snaps to the move step; Shift
+// sizes every axis together. Round shapes stay round; a shape's own sizes change where they
+// can (a box keeps scale 1), otherwise its scale. Lift: Z in move steps. Turn: about the
+// part's middle, 15 degree steps (Shift: 1). The panel follows live; one undo step on release.
+const ROUND = { cylinder: 1, tube: 1, cone: 1, torus: 1 };
+let hdrag = null;
+viewer.onHandle = (phase, h, e) => {
+  if (phase === 'start') {
+    const p = doc.top(sel[0]), m = p && meshes.get(p.id);
+    if (!p || !m || p.locked || step || past) return false;
+    hdrag = { p: structuredClone(p), lb: localBounds(m.tris), next: null };
+    return true;
+  }
+  if (!hdrag) return;
+  if (phase === 'move') {
+    const r = handleResult(hdrag, h, e);
+    hdrag.next = r;
+    viewer.setXform(r.part.id, r.view);
+    renderInspector({ ...r.part, view: r.view });
+    status(r.text);
+    return;
+  }
+  const d = hdrag; hdrag = null;
+  const r = d.next;
+  if (!r || r.same) { viewer.sync(doc.parts, meshes); renderInspector(); return; }
+  doc.update([d.p.id], r.label, q => { q.params = r.part.params; q.xform = r.part.xform; });
+};
+
+function handleResult(d, h, e) {
+  const p = d.p, { lo, hi } = d.lb, x0 = p.xform, s = x0.scale;
+  const part = structuredClone(p);
+  const R = matrix({ pos: [0, 0, 0], rot: x0.rot, scale: [1, 1, 1] });
+  if (h.kind === 'lift') {
+    const dz = +(Math.round(h.delta / moveStep) * moveStep).toFixed(6);
+    part.xform.pos = [x0.pos[0], x0.pos[1], +(x0.pos[2] + dz).toFixed(6)];
+    return { part, view: part.xform, same: !dz, label: `Lift ${p.name} ${mm(dz)} mm`, text: `Lift ${mm(dz)} mm` };
+  }
+  if (h.kind === 'rot') {
+    const st = e.shiftKey ? 1 : 15, deg = Math.round(h.deg / st) * st;
+    const q0 = new Quaternion().setFromEuler(new Euler(...x0.rot.map(v => (v * Math.PI) / 180), 'XYZ'));
+    const qa = new Quaternion().setFromAxisAngle(new Vector3().setComponent(h.axis, 1), (deg * Math.PI) / 180);
+    const eu = new Euler().setFromQuaternion(qa.multiply(q0), 'XYZ');
+    const rot = [eu.x, eu.y, eu.z].map(v => { const g = +((v * 180) / Math.PI).toFixed(4); return Object.is(g, -0) ? 0 : g; });
+    part.xform = rotated(p, rot);
+    return { part, view: part.xform, same: !deg, label: `Turn ${p.name} ${deg} deg about ${'XYZ'[h.axis]}`,
+      text: `Turn ${deg} deg about ${'XYZ'[h.axis]}${e.shiftKey ? '' : '  (Shift: 1 deg steps)'}` };
+  }
+  // size
+  const i = h.axis, size0 = (hi[i] - lo[i]) * s[i];
+  const size = Math.max(moveStep, Math.round((size0 + h.delta) / moveStep) * moveStep);
+  const k = size / size0, f = [1, 1, 1];
+  if (e.shiftKey || p.kind === 'sphere') f.fill(k);
+  else {
+    f[i] = k;
+    if (ROUND[p.kind] && i < 2) f[0] = f[1] = k;
+    if (p.kind === 'fillet' && i !== 1) f[0] = f[2] = k;   // its corner stays square
+  }
+  // the point that must not move: the far side on this axis, the middle across, the bottom in Z
+  const a = [0, 1, 2].map(j => j === i ? (h.side > 0 ? lo[j] : hi[j]) : j < 2 ? (lo[j] + hi[j]) / 2 : lo[2]);
+  const shift = new Vector3(...a.map((v, j) => s[j] * (f[j] - 1) * v)).applyMatrix4(R);
+  const view = { ...x0, pos: [x0.pos[0] - shift.x, x0.pos[1] - shift.y, x0.pos[2] - shift.z].map(v => +v.toFixed(6)), scale: s.map((v, j) => v * f[j]) };
+  part.xform = { ...view, scale: [...s] };
+  const P = part.params, mul = (key, j) => { if (P[key] != null) P[key] = +(P[key] * f[j]).toFixed(6); };
+  const kind = p.kind;
+  if (kind === 'box' || kind === 'wedge') { mul('x', 0); mul('y', 1); mul('z', 2); }
+  else if (kind === 'cylinder' || kind === 'tube') { mul('d', 0); mul('h', 2); if (e.shiftKey) mul('wall', 0); }
+  else if (kind === 'cone') { mul('d1', 0); mul('d2', 0); mul('h', 2); }
+  else if (kind === 'sphere') mul('d', 0);
+  else if (kind === 'fillet') { mul('r', 0); mul('length', 1); }
+  else if (kind === 'torus' && e.shiftKey) { mul('d', 0); mul('tube', 0); }
+  else part.xform.scale = view.scale.map(v => +v.toFixed(6));   // meshes, groups, a torus pulled out of round
+  const names = ['Width', 'Depth', 'Height'];
+  return { part, view, same: Math.abs(k - 1) < 1e-9, label: `Size ${p.name}: ${e.shiftKey ? 'all' : names[i].toLowerCase()} ${mm(size)} mm`,
+    text: `${names[i]} ${mm(size)} mm${e.shiftKey ? ' (all sides together)' : '  (Shift: all sides together)'}` };
+}
 
 const editable = () => sel.filter(id => !doc.top(id)?.locked);
 function nudge(dx, dy, dz) {
@@ -542,6 +625,7 @@ function startStep(t, partId) {
   if (!p) return;
   if (p.locked) { status(`${p.name} is locked (Ctrl+L).`); return; }
   step = { tool: t, partId, params: structuredClone(t.defaults || {}), face: null, seq: 0 };
+  viewer.setHandles(null);
   const body = h('div'), statusEl = h('div'), prog = h('div', { class: 'prog', style: 'display:none' }, h('i'));
   const applyBtn = button('Apply', () => applyStep(), { go: true });
   const row = h('div', { class: 'row' }, button('Preview', () => previewStep()), applyBtn, button('Cancel', () => cancelStep()));
@@ -620,6 +704,7 @@ function cancelStep() {
   viewer.setFacePick(null);
   clearTimeout(step.timer);
   step = null;
+  viewer.setHandles(sel.length === 1 && !past && !doc.top(sel[0])?.locked ? sel[0] : null);
   meshes.delete('preview');
   stepCard.replaceChildren();
 }

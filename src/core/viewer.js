@@ -64,6 +64,8 @@ export class Viewer {
     this.onDragStart = null;   // (id, event) -> bool (start a move)
     this.onDrag = null;        // (dx, dy, event) plate millimetres since the start
     this.onDragEnd = null;
+    this.onHandle = null;      // (phase 'start'|'move'|'end', info, event) -> start returns bool
+    this.initHandles();
 
     this.boxEl = document.createElement('div');
     this.boxEl.className = 'selbox';
@@ -89,13 +91,20 @@ export class Viewer {
         return;
       }
       this.controls.mouseButtons.LEFT = null;
+      const hh = this.hitHandle(e);
+      if (hh) {
+        const g = this.grab(hh, e);
+        if (g && this.onHandle?.('start', g.info, e) !== false) { down = { handle: g }; dom.setPointerCapture(e.pointerId); }
+        return;
+      }
       const hit = this.hit(e);
       down = { x: e.clientX, y: e.clientY, hit, moving: false, boxing: false };
       if (hit) down.plane = plateAt(e, hit.point.z);
       dom.setPointerCapture(e.pointerId);
     });
     dom.addEventListener('pointermove', e => {
-      if (!down) return;
+      if (!down) { this.hover(e); return; }
+      if (down.handle) { this.onHandle?.('move', this.follow(down.handle, e), e); return; }
       const dist = Math.hypot(e.clientX - down.x, e.clientY - down.y);
       if (!down.moving && !down.boxing && dist > 4) {
         if (down.hit && this.onDragStart?.(down.hit.id, e)) down.moving = true;
@@ -116,6 +125,7 @@ export class Viewer {
       if (e.button !== 0 || !down) return;
       const d = down;
       down = null;
+      if (d.handle) { this.onHandle?.('end', this.follow(d.handle, e), e); return; }
       if (d.moving) { this.onDragEnd?.(e); return; }
       if (d.boxing) {
         this.boxEl.style.display = 'none';
@@ -192,6 +202,7 @@ export class Viewer {
       this.pending = false;
       this.controls.update();
       if (this.clipOn) this.updateClip();
+      this.updateHandles();
       this.renderer.render(this.scene, this.camera);
     });
   }
@@ -353,6 +364,161 @@ export class Viewer {
     const b = new THREE.Box3();
     for (const [id, o] of this.objs) if ((!ids?.length || ids.includes(id)) && o.group.visible) b.expandByObject(o.group);
     return b.isEmpty() ? null : b;
+  }
+
+  // ---- handles ------------------------------------------------------------------------------
+  // On the one selected part: a cube on each side and on top (size), a cone above (lift) and
+  // a ring per axis (turn). Shapes only, no numbers: sizes are read in the side panel. They
+  // keep the same size on screen and draw over the part. Hover lights one up.
+  initHandles() {
+    const mk = () => new THREE.MeshBasicMaterial({ color: 0xb0b0b0, depthTest: false, depthWrite: false, transparent: true, opacity: 0.95 });
+    this.hot = new THREE.MeshBasicMaterial({ color: C.pick, depthTest: false, depthWrite: false, transparent: true });
+    this.handles = new THREE.Group();
+    this.handles.visible = false;
+    this.handleFor = null;
+    this.hparts = [];
+    const add = (geo, info, mat = mk()) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.renderOrder = 20;
+      m.userData = { info, mat };
+      this.handles.add(m);
+      this.hparts.push(m);
+      return m;
+    };
+    const cube = new THREE.BoxGeometry(1, 1, 1);
+    const outline = new THREE.EdgesGeometry(cube);
+    for (const [axis, side] of [[0, 1], [0, -1], [1, 1], [1, -1], [2, 1]]) {
+      const m = add(cube, { kind: 'size', axis, side });
+      const l = new THREE.LineSegments(outline, new THREE.LineBasicMaterial({ color: 0x000000, depthTest: false }));
+      l.renderOrder = 21;
+      m.add(l);
+    }
+    const cone = new THREE.ConeGeometry(0.45, 1.1, 20).rotateX(Math.PI / 2);
+    add(cone, { kind: 'lift' });
+    // rings: a thin visible band, picked through a thicker invisible one
+    for (const axis of [0, 1, 2]) {
+      const ring = new THREE.Group();
+      const band = new THREE.Mesh(new THREE.TorusGeometry(1, 0.008, 6, 128), mk());
+      band.material.opacity = 0.7;
+      band.renderOrder = 19;
+      const pick = add(new THREE.TorusGeometry(1, 0.05, 6, 64), { kind: 'rot', axis },
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+      pick.userData.show = band;
+      this.handles.remove(pick);
+      ring.add(band, pick);
+      if (axis === 0) ring.rotation.y = Math.PI / 2;
+      if (axis === 1) ring.rotation.x = Math.PI / 2;
+      ring.userData.axis = axis;
+      this.handles.add(ring);
+    }
+    this.scene.add(this.handles);
+  }
+
+  /** Show handles on this part (or none). */
+  setHandles(id) { this.handleFor = id; this.request(); }
+
+  /** World millimetres per screen pixel at a point. */
+  pxAt(p) {
+    const h = this.renderer.domElement.clientHeight || 1;
+    return (2 * this.camera.position.distanceTo(p) * Math.tan((this.camera.fov * Math.PI) / 360)) / h;
+  }
+
+  updateHandles() {
+    const o = this.handleFor && this.objs.get(this.handleFor);
+    const on = !!(o && o.group.visible && this.root.visible);
+    this.handles.visible = on;
+    if (!on) return;
+    o.group.updateMatrixWorld();
+    const M = o.group.matrixWorld, q = new THREE.Quaternion();
+    o.group.getWorldQuaternion(q);
+    const { min: lo, max: hi } = o.mesh.geometry.boundingBox;
+    const cx = (lo.x + hi.x) / 2, cy = (lo.y + hi.y) / 2, cz = (lo.z + hi.z) / 2;
+    const w = (x, y, z) => new THREE.Vector3(x, y, z).applyMatrix4(M);
+    const spots = [w(hi.x, cy, lo.z), w(lo.x, cy, lo.z), w(cx, hi.y, lo.z), w(cx, lo.y, lo.z), w(cx, cy, hi.z)];
+    const [size, lift] = [this.hparts.slice(0, 5), this.hparts[5]];
+    size.forEach((m, i) => { m.position.copy(spots[i]); m.quaternion.copy(q); m.scale.setScalar(this.pxAt(spots[i]) * 10); });
+    const top = spots[4], px = this.pxAt(top);
+    lift.position.copy(top).add(new THREE.Vector3(0, 0, px * 34));
+    lift.scale.setScalar(px * 16);
+    // rings around the middle (the point turns keep still), sized to clear the part
+    const mid = w(cx, cy, cz);
+    const wb = new THREE.Box3();
+    for (const x of [lo.x, hi.x]) for (const y of [lo.y, hi.y]) for (const z of [lo.z, hi.z]) wb.expandByPoint(w(x, y, z));
+    const half = wb.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+    const rpx = this.pxAt(mid);
+    const look = this.camera.position.clone().sub(mid).normalize();
+    for (const ring of this.handles.children.filter(c => c.userData.axis !== undefined)) {
+      const a = ring.userData.axis;
+      ring.visible = Math.abs(look.getComponent(a)) > 0.25;   // a ring seen edge-on is a line: no use, hide it
+      const r = (a === 0 ? Math.hypot(half.y, half.z) : a === 1 ? Math.hypot(half.x, half.z) : Math.hypot(half.x, half.y)) + rpx * 22;
+      ring.position.copy(mid);
+      ring.scale.setScalar(r);
+      ring.userData.radius = r;
+    }
+    this.handleState = { mid, q };
+  }
+
+  hitHandle(e) {
+    if (!this.handles.visible) return null;
+    this.updateHandles();
+    this.handles.updateMatrixWorld(true);
+    // cubes and the cone win over a ring passing behind them
+    const hits = this.ray(e).intersectObjects(this.hparts.filter(m => m.parent.visible), false);
+    const h = hits.find(x => x.object.userData.info.kind !== 'rot') || hits[0];
+    return h ? h.object : null;
+  }
+
+  hover(e) {
+    const h = this.handles.visible ? this.hitHandle(e) : null;
+    if (h === this.hovered) return;
+    const paint = (m, on) => { const t = m.userData.show || m; t.material = on ? this.hot : (t.userData.mat || t.userData.base || t.material); };
+    if (this.hovered) paint(this.hovered, false);
+    if (h) { const t = h.userData.show || h; if (!t.userData.base && !t.userData.mat) t.userData.base = t.material; paint(h, true); }
+    this.hovered = h;
+    this.renderer.domElement.style.cursor = h ? (h.userData.info.kind === 'rot' ? 'grab' : 'pointer') : '';
+    this.request();
+  }
+
+  /** Start dragging a handle: remember the line or plane its value is read along. */
+  grab(m, e) {
+    const info = m.userData.info;
+    const at = m.getWorldPosition(new THREE.Vector3());
+    if (info.kind === 'size') {
+      const u = new THREE.Vector3().setComponent(info.axis, info.side).applyQuaternion(this.handleState.q).normalize();
+      return { info, line: { p: at, u }, t0: this.alongLine(e, at, u) };
+    }
+    if (info.kind === 'lift') {
+      const u = new THREE.Vector3(0, 0, 1);
+      return { info, line: { p: at, u }, t0: this.alongLine(e, at, u) };
+    }
+    const n = new THREE.Vector3().setComponent(info.axis, 1);
+    const c = this.handleState.mid.clone();
+    const v0 = this.onPlane(e, c, n);
+    return v0 ? { info, plane: { c, n }, v0 } : null;
+  }
+
+  /** The handle's value now: mm along its line (size, lift) or degrees about its axis (rot). */
+  follow(g, e) {
+    if (g.line) return { ...g.info, delta: this.alongLine(e, g.line.p, g.line.u) - g.t0 };
+    const v = this.onPlane(e, g.plane.c, g.plane.n);
+    if (!v) return { ...g.info, deg: 0 };
+    const deg = (Math.atan2(new THREE.Vector3().crossVectors(g.v0, v).dot(g.plane.n), g.v0.dot(v)) * 180) / Math.PI;
+    return { ...g.info, deg };
+  }
+
+  /** Distance along a line (p, unit u) to the point nearest the pointer's ray. */
+  alongLine(e, p, u) {
+    const r = this.ray(e).ray, d = r.direction, w = r.origin.clone().sub(p);
+    const b = d.dot(u), dd = d.dot(w), uw = u.dot(w), den = 1 - b * b;
+    return den < 1e-9 ? 0 : (uw - b * dd) / den;
+  }
+
+  /** Where the pointer's ray meets a plane, as a direction from its centre. */
+  onPlane(e, c, n) {
+    const p = new THREE.Vector3();
+    if (!this.ray(e).ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, c), p)) return null;
+    const v = p.sub(c);
+    return v.lengthSq() > 1e-12 ? v.normalize() : null;
   }
 
   // ---- plate, cut, camera -------------------------------------------------------------------
