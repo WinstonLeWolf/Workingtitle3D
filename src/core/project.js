@@ -115,4 +115,23 @@ export class Project {
 
   /** Wait for every queued write. */
   flush() { return this.queue; }
+
+  /** Carry on in another (empty) folder: copy everything there between writes, then switch.
+   *  The old folder is left as it was; the caller removes it. */
+  moveTo(dir) {
+    const job = this.queue.then(async () => {
+      await copyDir(this.dir, dir);
+      this.meshes = await dir.getDirectoryHandle('meshes', { create: true });
+      this.dir = dir;
+    });
+    this.queue = job.catch(() => {});
+    return job;
+  }
+}
+
+async function copyDir(from, to) {
+  for await (const [name, h] of from.entries()) {
+    if (h.kind === 'directory') await copyDir(h, await to.getDirectoryHandle(name, { create: true }));
+    else await writeFile(to, name, await h.getFile());
+  }
 }

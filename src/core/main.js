@@ -107,7 +107,7 @@ let fmt = 'stl';
 // ---- layout -------------------------------------------------------------------------------
 const app = document.getElementById('app');
 const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf', multiple: true, style: 'display:none' });
-const projLabel = h('span', { class: 'file' });
+const projLabel = h('button', { type: 'button', class: 'file', onclick: () => renameProject() });
 const projBtn = button('Save as project', () => pickProjectFolder(), { small: true });
 const reopenBtn = button('Reopen', () => reopenLast(), { small: true, title: 'Reopen the last project' });
 reopenBtn.style.display = 'none';
@@ -144,14 +144,14 @@ const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => 
 const partList = h('div', { class: 'parts' });
 const stepCard = h('div');
 const inspector = h('div', { class: 'inspector', style: 'display:none' });
-// one panel on the right, full height, in two tabs that scroll: Shapes (the shapes, then the
-// tool step and the selected part's options) and Parts (the parts list)
-const panes = { shapes: h('div', { class: 'pane' }, card('Shapes', shapeGrid), stepCard, inspector),
-  parts: h('div', { class: 'pane', style: 'display:none' }, card('Parts', partList)) };
-const tabs = seg([['shapes', 'Shapes'], ['parts', 'Parts']], 'shapes', v => showTab(v));
+// one panel on the right, full height, tabs at the very top, each tab scrolls:
+// Parts (the parts list, then the tool step and the selected part's options) and New parts (shapes)
+const panes = { parts: h('div', { class: 'pane' }, card('Parts', partList), stepCard, inspector),
+  shapes: h('div', { class: 'pane', style: 'display:none' }, card('Shapes', shapeGrid)) };
+const tabs = seg([['parts', 'Parts'], ['shapes', 'New parts']], 'parts', v => showTab(v));
 tabs.classList.add('tabs');
 function showTab(v) { tabs.set(v); for (const [k, el] of Object.entries(panes)) el.style.display = k === v ? '' : 'none'; }
-const aside = h('aside', {}, h('div', { class: 'panehead' }, h('div', { class: 'appname' }, 'Workingtitle3D'), tabs), panes.shapes, panes.parts);
+const aside = h('aside', {}, tabs, panes.parts, panes.shapes);
 
 const view = h('div', { id: 'view' });
 const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF or OBJ here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
@@ -528,7 +528,7 @@ function startStep(t, partId) {
   const applyBtn = button('Apply', () => applyStep(), { go: true });
   const row = h('div', { class: 'row' }, button('Preview', () => previewStep()), applyBtn, button('Cancel', () => cancelStep()));
   stepCard.replaceChildren(card(`${t.title}: ${p.name}`, t.blurb ? h('p', {}, t.blurb) : null, body, statusEl, prog, row));
-  showTab('shapes');
+  showTab('parts');
   stepCard.scrollIntoView({ block: 'nearest' });
   const m = meshes.get(partId);
   const lb = m ? localBounds(m.tris) : null;
@@ -691,10 +691,12 @@ function updateHeader() {
   btnRedo.disabled = doc.at >= doc.history.length;
   if (project) {
     projLabel.textContent = project.error ? '' : `${project.name}  ${project.pending ? 'saving...' : 'saved'}`;
+    projLabel.title = 'Click to rename the project';
     projBtn.style.display = 'none';
     if (project.error) { projLabel.textContent = ''; status(`Could not write to the project folder: ${project.error.message}`, true); }
   } else {
     projLabel.textContent = doc.history.length ? 'not saved to disk' : '';
+    projLabel.title = 'Click to save as a named project';
     projBtn.style.display = doc.history.length ? '' : 'none';
   }
 }
@@ -783,6 +785,29 @@ async function saveToProjects() {
   } catch (err) { status(`Could not start the project: ${err.message}`, true); }
 }
 const pickProjectFolder = saveToProjects;
+
+/** Rename the project: its folder under projects/ is copied to the new name, then the old one removed. */
+async function renameProject() {
+  if (!project) return saveToProjects();
+  const pdir = home && await folders.projectsDir(home);
+  const inside = pdir && (await pdir.resolve(project.dir).catch(() => null))?.length === 1;
+  if (!inside) { status(`${project.name} is not in projects/, so rename its folder outside the app.`); return; }
+  const old = project.name, taken = await folders.listProjects(home);
+  let name = await askName('New name for this project.', old);
+  while (name && name !== old && taken.includes(name)) name = await askName(`"${name}" already exists. Pick another name.`, name + ' 2');
+  if (!name || name === old) return;
+  try {
+    await project.moveTo(await folders.projectFolder(home, name, true));
+  } catch (err) {
+    await pdir.removeEntry(name, { recursive: true }).catch(() => {});   // the half-made copy; the project stays where it was
+    status(`Could not rename the project: ${err.message}`, true);
+    return;
+  }
+  await pdir.removeEntry(old, { recursive: true }).catch(() => {});
+  await folders.remember('last', name);
+  updateHeader();
+  status(`Project renamed: ${old} is now ${name}.`);
+}
 
 function resetDoc() {
   cancelStep();

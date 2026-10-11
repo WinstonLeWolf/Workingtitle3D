@@ -78,14 +78,16 @@ try {
     }
     throw new Error('no field ' + label);
   };
+  // shapes live on the New parts tab; come back to Parts, where the options are
+  const addShape = async name => { await click('.tabs button', 'New parts'); await click('.shapes .btn', name); await click('.tabs button', 'Parts'); };
   const keys = async (...k) => { for (const x of k) await page.keyboard.down(x); for (const x of k.reverse()) await page.keyboard.up(x); await sleep(150); };
 
   await shot('0-empty');
-  await click('.shapes .btn', 'Box');
+  await addShape('Box');
   await page.waitForSelector('dialog[open]');
   await shot('1-folder-ask');
   await click('dialog .btn', 'Cancel');
-  await click('.shapes .btn', 'Cylinder');
+  await addShape('Cylinder');
   await sleep(500);
   step('two shapes', (await parts()).length === 2, (await parts()).join(' | '));
 
@@ -169,10 +171,7 @@ try {
   await click('.btn', 'Top'); await sleep(300);
   const a0 = await posOf();
   await page.click('#view canvas', { offset: { x: 5, y: 5 } }).catch(() => {});
-  await click('.tabs button', 'Parts');
   await click('.prow', 'plateRedsolid').catch(async () => { const r = await page.$$('.prow'); await r[r.length - 1].click(); });
-  await shot('4b-parts-tab');
-  await click('.tabs button', 'Shapes');
   await keys('ArrowRight');
   const a1 = await posOf();
   await click('.btn', 'Right'); await sleep(300);
@@ -238,7 +237,7 @@ try {
   await click('dialog .btn', 'OK');
 
   // rotation turns about the part's middle; Bottom Z shows where it really sits
-  await click('.shapes .btn', 'Box');
+  await addShape('Box');
   await sleep(600);
   const fv = async l => page.$$eval('.inspector .field', (fs, l) => +fs.find(f => f.querySelector('label').textContent === l)?.querySelector('input').value, l);
   const cx0 = await fv('Centre X'), z0 = await fv('Bottom Z');
@@ -266,14 +265,14 @@ try {
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await sleep(800);
-  await click('.shapes .btn', 'Box');
+  await addShape('Box');
   await page.waitForSelector('dialog[open]');
   await click('dialog .btn', 'Pick folder');
   await page.waitForSelector('dialog[open] input.name-in');
   await page.$eval('dialog[open] input.name-in', i => { i.value = 'Test case'; });
   await click('dialog .btn', 'Save');
   await waitStatus(/Saving to projects|ERROR/);
-  await click('.shapes .btn', 'Cylinder');
+  await addShape('Cylinder');
   await sleep(1500);
   await page.reload();
   const reopened = await waitStatus(/Opened|ERROR/, 15000).catch(e => e.message);
@@ -297,6 +296,23 @@ try {
   });
   const r = report(readSTL(Uint8Array.from(bytes).buffer));
   step('export + read back', r.watertight, `${r.triangles} tris  ${describe(r)}  vol ${r.volume.toFixed(0)}`);
+
+  // rename: click the project name box; the folder moves, the next step lands in the new one
+  await page.click('header .file');
+  await page.waitForSelector('dialog[open] input.name-in');
+  await page.$eval('dialog[open] input.name-in', i => { i.value = 'Renamed case'; });
+  await click('dialog .btn', 'Save');
+  const rn = await waitStatus(/renamed|ERROR/);
+  await addShape('Sphere');
+  await sleep(1500);
+  const after = await page.evaluate(async () => {
+    const pd = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('home')).getDirectoryHandle('projects');
+    const names = []; for await (const [n] of pd.entries()) names.push(n);
+    const j = await (await (await (await pd.getDirectoryHandle('Renamed case')).getFileHandle('journal.ndjson')).getFile()).text();
+    return { names, label: document.querySelector('header .file').textContent, lastStep: j.trim().split('\n').pop() };
+  });
+  step('rename the project', /Renamed case/.test(after.label) && after.names.includes('Renamed case') && !after.names.includes('Test case') && /Sphere/.test(after.lastStep),
+    `${rn.slice(0, 50)} | ${after.names.join(', ')} | ${after.label}`);
 } catch (e) {
   fail++;
   const st = await page.$eval('footer .msg', e => e.textContent).catch(() => '');
