@@ -1,0 +1,19 @@
+{
+  "name": "workingtitle3d",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Offline browser 3D toolset. Core viewer plus tool plugins.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch"
+  },
+  "devDependencies": {
+    "clipper-lib": "6.4.2",
+    "earcut": "3.2.3",
+    "esbuild": "0.25.10",
+    "manifold-3d": "3.5.4",
+    "three": "0.186.1",
+    "three-mesh-bvh": "0.9.15"
+  }
+}
