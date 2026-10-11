@@ -82,7 +82,7 @@ try {
   await click('.shapes .btn', 'Box');
   await page.waitForSelector('dialog[open]');
   await shot('1-folder-ask');
-  await click('dialog .btn', 'Later');
+  await click('dialog .btn', 'Cancel');
   await click('.shapes .btn', 'Cylinder');
   await sleep(500);
   step('two shapes', (await parts()).length === 2, (await parts()).join(' | '));
@@ -207,7 +207,7 @@ try {
 
   // no folder access in this browser: a plain message, not a raw error
   await page.evaluate(() => { delete window.showDirectoryPicker; window.showDirectoryPicker = undefined; });
-  await click('header .btn', 'Pick folder');
+  await click('header .btn', 'Save as project');
   await page.waitForSelector('dialog[open]');
   const msg = await page.$eval('dialog[open]', d => d.textContent);
   step('no folder access explained', /switched off/.test(msg) && /brave:\/\/flags/.test(msg));
@@ -231,18 +231,44 @@ try {
   await sleep(400);
   step('D drops the rotated part onto the plate', Math.abs(await fv('Bottom Z')) < 1e-3, `bottom Z ${await fv('Bottom Z')}`);
 
-  // export
+  // projects: home folder picked once, project named, reopened by itself after a reload.
+  // The picker is stood in by the browser's private storage, so no dialog is needed.
+  await page.evaluateOnNewDocument(() => {
+    window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('home', { create: true });
+  });
+  await page.reload();
+  await sleep(800);
+  await click('.shapes .btn', 'Box');
+  await page.waitForSelector('dialog[open]');
+  await click('dialog .btn', 'Pick folder');
+  await page.waitForSelector('dialog[open] input.name-in');
+  await page.$eval('dialog[open] input.name-in', i => { i.value = 'Test case'; });
+  await click('dialog .btn', 'Save');
+  await waitStatus(/Saving to projects|ERROR/);
+  await click('.shapes .btn', 'Cylinder');
+  await sleep(1500);
+  await page.reload();
+  const reopened = await waitStatus(/Opened|ERROR/, 15000).catch(e => e.message);
+  step('project reopens itself after a reload', /Opened Test case: 2 parts/.test(reopened), reopened);
+  await click('header .btn', 'Open');
+  await page.waitForSelector('dialog[open] .projlist');
+  const listed = await page.$$eval('dialog[open] .projlist .btn', b => b.map(x => x.textContent));
+  step('Open lists the projects', listed.includes('Test case'), listed.join(', '));
+  await click('dialog .btn', 'Cancel');
+
+  // export: into exports/, never over an existing file (-1, -2 ...), and a closed solid
   await keys('Control', 'e');
-  await waitStatus(/Exported|ERROR/);
-  let file = null;
-  for (let i = 0; i < 100 && !file; i++) { const f = readdirSync(join(OUT, 'dl')).find(n => n.endsWith('.stl')); if (f) file = join(OUT, 'dl', f); else await sleep(100); }
-  if (!file) step('export', false, await statusText());
-  else {
-    await sleep(300);
-    const buf = readFileSync(file);
-    const r = report(readSTL(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length)));
-    step('export + read back', r.watertight, `${r.triangles} tris  ${describe(r)}  vol ${r.volume.toFixed(0)}`);
-  }
+  const e1 = await waitStatus(/Exported|ERROR/);
+  await page.evaluate(() => { document.querySelector('footer .msg').textContent = ''; });
+  await keys('Control', 'e');
+  const e2 = await waitStatus(/Exported|ERROR/);
+  step('export names never collide', /exports\/Test case\.stl/.test(e1) && /exports\/Test case-1\.stl/.test(e2), `${e1.slice(0, 40)} | ${e2.slice(0, 40)}`);
+  const bytes = await page.evaluate(async () => {
+    const dir = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('home')).getDirectoryHandle('exports');
+    return [...new Uint8Array(await (await (await dir.getFileHandle('Test case-1.stl')).getFile()).arrayBuffer())];
+  });
+  const r = report(readSTL(Uint8Array.from(bytes).buffer));
+  step('export + read back', r.watertight, `${r.triangles} tris  ${describe(r)}  vol ${r.volume.toFixed(0)}`);
 } catch (e) {
   fail++;
   console.log('FAIL ' + e.message);

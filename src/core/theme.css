@@ -163,6 +163,8 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
   border-radius: 3px; padding: 3px 6px; outline: 0; }
 .hex-in.bad { border-color: var(--yellow); }
 .slider input[type=range] { margin-top: 4px; }
+.projlist { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-height: 50vh; overflow-y: auto; min-width: 260px; }
+.projlist .btn { text-align: left; }
 .selbox { position: absolute; display: none; border: 1px dashed var(--glow); background: rgba(125,207,125,.08); pointer-events: none; }
 
 /* status */

@@ -7,6 +7,7 @@ import * as ui from './ui.js';
 import { Vector3, Box3 } from 'three';
 import { Doc, shapeKey, IDENT, matrix } from './doc.js';
 import { Project } from './project.js';
+import * as folders from './folders.js';
 import { describe, weld } from './meshcheck.js';
 
 const { h, button, seg, card, kv, errorLine, ask, mm, count } = ui;
@@ -105,7 +106,9 @@ let fmt = 'stl';
 const app = document.getElementById('app');
 const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf', multiple: true, style: 'display:none' });
 const projLabel = h('span', { class: 'file' });
-const projBtn = button('Pick folder', () => pickProjectFolder(), { small: true });
+const projBtn = button('Save as project', () => pickProjectFolder(), { small: true });
+const reopenBtn = button('Reopen', () => reopenLast(), { small: true, title: 'Reopen the last project' });
+reopenBtn.style.display = 'none';
 const btnUndo = button('Undo', () => undo(), { title: 'Ctrl+Z' });
 const btnRedo = button('Redo', () => redo(), { title: 'Ctrl+Y' });
 const header = h('header', {},
@@ -114,9 +117,10 @@ const header = h('header', {},
   button('Open', () => openProject(), { title: 'Open a project folder' }),
   button('Import', () => importInput.click(), { title: 'Add an STL, 3MF or OBJ as a part (Ctrl+I is intersect)' }),
   seg([['stl', 'STL'], ['3mf', '3MF'], ['obj', 'OBJ']], fmt, v => { fmt = v; }),
-  button('Export', () => exportModel(), { title: 'Save every solid part joined into one closed solid (Ctrl+E)' }),
+  button('Export', () => exportModel(), { title: 'Join every solid part into one closed solid, into exports/ (Ctrl+E)' }),
+  button('Export as...', () => exportModel(true), { title: 'Export to a place you pick (Ctrl+Shift+E)' }),
   btnUndo, btnRedo,
-  h('span', { class: 'spacer' }), projLabel, projBtn, importInput);
+  h('span', { class: 'spacer' }), projLabel, reopenBtn, projBtn, importInput);
 
 const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => {
   const b = button(k[0].toUpperCase() + k.slice(1), () => addShape(k), { title: `Add a ${k} on the plate` });
@@ -669,36 +673,79 @@ function watch(p) {
   updateHeader();
 }
 
-async function askForFolder() {
-  const go = await ask('Pick a folder for this project. Every step is written there as you work, so a crash loses nothing.',
-    [['Later', false], ['Pick folder', true, true]]);
-  if (go) await pickProjectFolder();
-  else status('Not saved to disk yet. Pick folder (top right) when ready.');
+// ---- the home folder: projects/<name>/ inside it ----------------------------------------
+let home = null;
+
+async function noFolderAccess() {
+  if (typeof window.showDirectoryPicker === 'function') return false;
+  status('This browser has folder access switched off, so projects cannot be saved. In Brave: brave://flags/#file-system-access-api, Enabled, restart.', true);
+  await ask(h('div', {}, h('p', {}, 'This browser has folder access switched off, so the project cannot be saved to a folder.'),
+    h('p', {}, 'In Brave: put brave://flags/#file-system-access-api in the address bar, set it to Enabled, and restart Brave.'),
+    h('p', {}, 'Edge, Vivaldi and Chromium have it on already. Export still works meanwhile.')));
+  return true;
 }
 
-/** The browser's folder picker, or null. Some Chromium browsers ship with folder access off. */
-async function chooseFolder() {
-  if (typeof window.showDirectoryPicker !== 'function') {
-    status('This browser has folder access switched off, so projects cannot be saved. '
-      + 'In Brave: open brave://flags/#file-system-access-api, set it to Enabled, restart Brave. Edge, Vivaldi and Chromium have it on.', true);
-    await ask(h('div', {}, h('p', {}, 'This browser has folder access switched off, so the project cannot be saved to a folder.'),
-      h('p', {}, 'In Brave: put brave://flags/#file-system-access-api in the address bar, set it to Enabled, and restart Brave.'),
-      h('p', {}, 'Edge, Vivaldi and Chromium have it on already. Export still works meanwhile.')));
-    return null;
-  }
-  try { return await window.showDirectoryPicker({ mode: 'readwrite', id: 'wt3d-project' }); } catch (err) { if (err.name !== 'AbortError') status(err.message, true); return null; }
+/** The home folder, ready to write. Call from a click: it may need to ask. */
+async function ensureHome() {
+  if (home) return home;
+  if (await noFolderAccess()) return null;
+  const saved = await folders.savedHome();
+  try {
+    if (saved.home && saved.state === 'granted') return (home = saved.home);
+    if (saved.home) {
+      // the browser wants a click before it gives the folder back
+      const go = await ask(`Allow the projects folder (${saved.home.name}) again?`, [['Cancel', false], ['Allow', true, true]]);
+      if (!go) return null;
+      if (await folders.allow(saved.home)) return (home = saved.home);
+    }
+    const go = await ask(h('div', {}, h('p', {}, 'Pick the folder this app lives in (the Workingtitle3D folder).'),
+      h('p', {}, 'Projects are kept in a projects folder inside it. This is asked once; after that the app remembers it.')),
+      [['Cancel', false], ['Pick folder', true, true]]);
+    if (!go) return null;
+    home = await folders.pickHome();
+    return home;
+  } catch (err) { if (err.name !== 'AbortError') status(err.message, true); return null; }
 }
 
-async function pickProjectFolder() {
-  const dir = await chooseFolder();
-  if (!dir) return;
-  if (await Project.exists(dir)) {
-    const go = await ask(`${dir.name} already holds a project. Open it instead? Your current parts are dropped.`, [['Cancel', false], ['Open it', true, true]]);
-    if (go) await openFolder(dir);
-    return;
-  }
-  try { watch(await Project.create(dir, doc)); status(`Project folder: ${dir.name}. Every step is saved there.`); } catch (err) { status(`Could not start the project: ${err.message}`, true); }
+/** In-page dialog asking for a project name. */
+function askName(message, def) {
+  return new Promise(res => {
+    const input = h('input', { type: 'text', class: 'name-in', value: def, spellcheck: 'false' });
+    const d = h('dialog', {}, h('div', {}, message), h('div', { class: 'row' }, input));
+    const done = v => { d.close(); d.remove(); res(v); };
+    input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') done(folders.cleanName(input.value) || null); if (e.key === 'Escape') done(null); });
+    d.append(h('div', { class: 'row' }, button('Cancel', () => done(null)), button('Save', () => done(folders.cleanName(input.value) || null), { go: true })));
+    d.addEventListener('cancel', () => done(null));
+    document.body.append(d);
+    d.showModal();
+    input.select();
+  });
 }
+
+async function nextUntitled() {
+  const names = home ? await folders.listProjects(home) : [];
+  let n = 1;
+  while (names.includes(`Untitled ${n}`)) n++;
+  return `Untitled ${n}`;
+}
+
+async function askForFolder() { await saveToProjects(); }
+
+/** Save the current parts as a new named project under projects/. */
+async function saveToProjects() {
+  if (!(await ensureHome())) { status('Not saved to disk yet. "Save as project" (top right) when ready.'); return; }
+  const taken = await folders.listProjects(home);
+  let name = await askName('Name this project. Every step is saved in projects/ as you work.', await nextUntitled());
+  while (name && taken.includes(name)) name = await askName(`"${name}" already exists. Pick another name.`, name + ' 2');
+  if (!name) { status('Not saved to disk yet. "Save as project" (top right) when ready.'); return; }
+  try {
+    const dir = await folders.projectFolder(home, name, true);
+    watch(await Project.create(dir, doc));
+    await folders.remember('last', name);
+    status(`Saving to projects/${name}. Every step is written there.`);
+  } catch (err) { status(`Could not start the project: ${err.message}`, true); }
+}
+const pickProjectFolder = saveToProjects;
 
 function resetDoc() {
   cancelStep();
@@ -719,9 +766,27 @@ async function newProject() {
   status('New project.');
 }
 
+/** Open: the list of projects, or another folder. */
 async function openProject() {
-  const dir = await chooseFolder();
-  if (dir) await openFolder(dir);
+  if (!(await ensureHome())) return;
+  const names = await folders.listProjects(home);
+  const pick = await new Promise(res => {
+    const d = h('dialog', {});
+    const done = v => { d.close(); d.remove(); res(v); };
+    const list = h('div', { class: 'projlist' }, ...names.map(n => button(n, () => done(n))));
+    if (!names.length) list.append(h('p', {}, 'No projects yet.'));
+    d.append(h('div', {}, 'Open a project'), list, h('div', { class: 'row' }, button('Other folder...', () => done({ other: true })), button('Cancel', () => done(null))));
+    d.addEventListener('cancel', () => done(null));
+    document.body.append(d);
+    d.showModal();
+  });
+  if (!pick) return;
+  if (pick.other) {
+    try { await openFolder(await window.showDirectoryPicker({ mode: 'readwrite', id: 'wt3d-other' })); } catch (err) { if (err.name !== 'AbortError') status(err.message, true); }
+    return;
+  }
+  await openFolder(await folders.projectFolder(home, pick));
+  await folders.remember('last', pick);
 }
 async function openFolder(dir) {
   if (!(await Project.exists(dir))) { status(`${dir.name} holds no project.`, true); return; }
@@ -759,13 +824,30 @@ async function importFiles(files) {
 }
 
 const MIME = { stl: 'model/stl', '3mf': 'model/3mf', obj: 'model/obj' };
-async function exportModel() {
+/** A name not yet used in this folder: name.stl, name-1.stl, name-2.stl ... */
+async function freeName(dir, base, ext) {
+  const exists = async n => { try { await dir.getFileHandle(n); return true; } catch { return false; } };
+  if (!(await exists(`${base}.${ext}`))) return `${base}.${ext}`;
+  for (let i = 1; ; i++) if (!(await exists(`${base}-${i}.${ext}`))) return `${base}-${i}.${ext}`;
+}
+
+/** Export: straight into exports/ next to projects/, never overwriting (no dialog).
+ *  pick = true (Export as...) asks where instead. */
+async function exportModel(pick = false) {
   if (!doc.parts.length) { status('Nothing to export.'); return; }
-  const name = `${project?.name || 'model'}.${fmt}`;
+  const base = folders.cleanName(project?.name || 'model') || 'model';
+  const name = `${base}.${fmt}`;
   let handle = null;
-  // ask for the place first, while the click still counts as a click
-  try { handle = await window.showSaveFilePicker({ suggestedName: name, id: 'wt3d-export', types: [{ description: fmt.toUpperCase(), accept: { [MIME[fmt]]: ['.' + fmt] } }] }); }
-  catch (err) { if (err.name === 'AbortError') { status('Export cancelled.'); return; } }
+  if (!pick && home) {
+    try {
+      const dir = await home.getDirectoryHandle('exports', { create: true });
+      handle = await dir.getFileHandle(await freeName(dir, base, fmt), { create: true });
+    } catch (err) { status(`Could not use the exports folder: ${err.message}`, true); return; }
+  } else {
+    // ask for the place first, while the click still counts as a click
+    try { handle = await window.showSaveFilePicker({ suggestedName: name, id: 'wt3d-export', types: [{ description: fmt.toUpperCase(), accept: { [MIME[fmt]]: ['.' + fmt] } }] }); }
+    catch (err) { if (err.name === 'AbortError') { status('Export cancelled.'); return; } }
+  }
   status('Joining parts...');
   let bytes;
   try {
@@ -781,7 +863,7 @@ async function exportModel() {
       const buf = await (await handle.getFile()).arrayBuffer();
       const r = await pool.call('io', { type: 'check', name: handle.name, buf }, [buf]);
       if (!r.report.watertight) { await handle.remove?.().catch(() => {}); status(`The exported file did not read back as a closed solid (${r.text}), so it was removed.`, true); return; }
-      status(`Exported ${handle.name}: one closed solid, ${count(r.report.triangles)} triangles, read back and checked.`);
+      status(`Exported ${home && !pick ? 'exports/' : ''}${handle.name}: one closed solid, ${count(r.report.triangles)} triangles, read back and checked.`);
     } catch (err) { status(`Could not write the file: ${err.message}`, true); }
     return;
   }
@@ -823,7 +905,7 @@ window.addEventListener('keydown', e => {
   if (c && k === 'c') return act(copySel);
   if (c && k === 'x') return act(() => { copySel(); deleteSel(); });
   if (c && k === 'v') return act(paste);
-  if (c && k === 'e') return act(exportModel);
+  if (c && k === 'e') return act(() => exportModel(s));
   if (c && k === 'o') return act(openProject);
   if (c && (k === 'arrowup' || k === 'arrowdown')) return act(() => nudge(0, 0, (k === 'arrowup' ? 1 : -1) * (s ? 10 : GRID)));
   if (c) return;
@@ -854,3 +936,20 @@ window.addEventListener('beforeunload', e => { if (project?.pending) { e.prevent
 
 refresh();
 viewer.view('iso');
+
+// reopen the last project: straight away if the browser still allows the home folder,
+// else one click on Reopen (a page may only ask for access from a click)
+async function reopenLast() {
+  const saved = await folders.savedHome(), last = await folders.recall('last');
+  if (!saved.home || !last) return;
+  if (saved.state !== 'granted' && !(await folders.allow(saved.home).catch(() => false))) { status('The browser did not allow the projects folder.', true); return; }
+  home = saved.home;
+  reopenBtn.style.display = 'none';
+  try { await openFolder(await folders.projectFolder(home, last)); } catch { status(`The last project, ${last}, is gone from projects/.`, true); }
+}
+(async () => {
+  const saved = await folders.savedHome().catch(() => ({})), last = await folders.recall('last');
+  if (!saved?.home || !last) return;
+  if (saved.state === 'granted') reopenLast();
+  else { reopenBtn.textContent = `Reopen ${last}`; reopenBtn.style.display = ''; }
+})();
