@@ -1,5 +1,5 @@
 Workingtitle3D
-Copyright 2026 bootdsc (Cyberdeck Cafe)
+Copyright 2026 bootdsc
 
 Workingtitle3D is source-available: Apache License 2.0 with the Commons Clause below.
 In short, and the full terms below are what count:
@@ -32,7 +32,7 @@ License must also include this Commons Clause License Condition notice.
 
 Software: Workingtitle3D
 License: Apache License 2.0
-Licensor: bootdsc (Cyberdeck Cafe)
+Licensor: bootdsc
 
 
 Bundled libraries keep their own licences: see THIRD-PARTY-NOTICES.txt.
