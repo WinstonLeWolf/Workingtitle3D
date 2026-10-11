@@ -56,7 +56,7 @@ export class Viewer {
     this.scene.add(this.root);
     this.objs = new Map();     // part id -> {group, mesh, edges, key, tris, part}
     this.selected = new Set();
-    this.makePlate(200);
+    this.setPlate({ w: 200, d: 200, every: 10 });
 
     // events the app listens to
     this.onPick = null;        // (id|null, faceIndex, event)
@@ -356,24 +356,32 @@ export class Viewer {
   }
 
   // ---- plate, cut, camera -------------------------------------------------------------------
-  makePlate(size) {
-    const half = size / 2;
-    const p = [], c = [];
-    const minor = new THREE.Color(C.grid), major = new THREE.Color(C.gridMajor);
-    for (let v = -half; v <= half + 1e-9; v += 10) {
-      const k = Math.abs(v % 50) < 1e-6 ? major : minor;
-      p.push(v, -half, 0, v, half, 0, -half, v, 0, half, v, 0);
-      c.push(k.r, k.g, k.b, k.r, k.g, k.b, k.r, k.g, k.b, k.r, k.g, k.b);
+  /** Plate w x d mm centred on 0, a line every `every` mm from the centre, a darker line
+   *  every 5 or 10 of them, and the edges. */
+  setPlate({ w, d, every }) {
+    if (this.plate) {
+      this.scene.remove(this.plate);
+      this.plate.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     }
+    const hw = w / 2, hd = d / 2, p = [], c = [];
+    const minor = new THREE.Color(C.grid), major = new THREE.Color(C.gridMajor);
+    const big = every * (every >= 10 ? 5 : 10);
+    const onBig = v => Math.abs(v / big - Math.round(v / big)) < 1e-6;
+    const line = (k, ...xyz) => { p.push(...xyz); c.push(k.r, k.g, k.b, k.r, k.g, k.b); };
+    for (let i = -Math.floor(hw / every + 1e-9); i * every <= hw + 1e-9; i++) { const v = i * every; line(onBig(v) ? major : minor, v, -hd, 0, v, hd, 0); }
+    for (let i = -Math.floor(hd / every + 1e-9); i * every <= hd + 1e-9; i++) { const v = i * every; line(onBig(v) ? major : minor, -hw, v, 0, hw, v, 0); }
+    line(major, -hw, -hd, 0, hw, -hd, 0); line(major, -hw, hd, 0, hw, hd, 0);
+    line(major, -hw, -hd, 0, -hw, hd, 0); line(major, hw, -hd, 0, hw, hd, 0);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
     g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3));
     const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true }));
-    const plate = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ color: C.plate, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }));
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ color: C.plate, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }));
     plate.position.z = -0.01;
     this.plate = new THREE.Group();
     this.plate.add(plate, lines);
     this.scene.add(this.plate);
+    this.request();
   }
 
   setClip(axis, t) { this.clipAxis = axis; this.clipT = t; this.updateClip(); this.request(); }

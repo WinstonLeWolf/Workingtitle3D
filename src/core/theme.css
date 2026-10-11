@@ -21,20 +21,28 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--gray-l
 ::-webkit-scrollbar-thumb:hover { background: var(--green-dk); }
 * { scrollbar-color: var(--border) var(--bg); }
 
-#app { display: grid; height: 100%;
-  grid-template: "head head" 42px "side view" 1fr "stat stat" 26px / 300px 1fr; }
+#app { display: grid; height: 100%; grid-template: "view side" 1fr / 1fr 300px; }
 
-/* header */
-header { grid-area: head; display: flex; align-items: center; gap: 8px; padding: 0 10px;
-  background: var(--panel); border-bottom: 1px solid var(--border); }
-header .name { color: var(--green); font-weight: 600; letter-spacing: .5px; margin-right: 10px; }
-header .spacer { flex: 1; }
+/* header: no bar; its buttons float over the top of the view */
+header { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 3; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 6px; pointer-events: none; }
+header > * { pointer-events: auto; }
+header > .spacer { flex: 1; pointer-events: none; }
+header .btn, header .seg { box-shadow: 0 1px 4px rgba(0,0,0,.7); }
 header .file { color: var(--gray); font-family: var(--mono); font-size: 12px; max-width: 30vw;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: rgba(20,20,20,.92);
+  border: 1px solid var(--border); border-radius: 3px; padding: 4px 8px; }
+header .file:empty { display: none; }
+.popwrap { position: relative; }
+.pop { position: absolute; top: calc(100% + 6px); left: 0; width: 240px; z-index: 4; box-shadow: 0 2px 10px rgba(0,0,0,.8); }
+.appname { color: var(--green); font-weight: 600; letter-spacing: .5px; padding: 2px 2px 0; }
 
 /* side */
-aside { grid-area: side; overflow-y: auto; background: var(--bg); border-right: 1px solid var(--border);
-  padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+aside { grid-area: side; min-height: 0; background: var(--bg); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; }
+.panehead { padding: 10px 10px 0; display: flex; flex-direction: column; gap: 8px; }
+.tabs button { padding: 5px 6px; }
+.pane { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 10px; }
 .card h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--gray); text-transform: uppercase;
   letter-spacing: .8px; display: flex; align-items: center; gap: 6px; }
@@ -111,12 +119,19 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 #view { grid-area: view; position: relative; overflow: hidden; background: var(--bg); }
 #view canvas { display: block; width: 100%; height: 100%; outline: 0; }
 .overlay { position: absolute; display: flex; gap: 6px; align-items: center; }
-.overlay.tl { top: 10px; left: 10px; }
+.overlay.tl { top: 52px; left: 10px; }
+/* move step: one column bottom left, as wide as the cut panel is tall, sitting above it */
+.overlay.bl { bottom: 82px; left: 10px; flex-direction: column; gap: 8px; background: rgba(20,20,20,.92);
+  border: 1px solid var(--border); border-radius: 4px; padding: 6px; }
+.movestep { width: 34px; height: 30px; padding: 0; font: 12px var(--mono); color: var(--gray-lt); background: var(--hex);
+  border: 1px solid var(--border); border-radius: 3px; cursor: pointer; }
+.movestep:hover { background: var(--hex-hover); border-color: var(--green-dk); color: var(--glow); }
+.movestep.on { background: var(--green-dk); border-color: var(--glow); color: var(--glow); font-weight: 700; }
 .overlay.tr { top: 10px; right: 10px; background: rgba(20,20,20,.92); border: 1px solid var(--border);
   border-radius: 4px; padding: 6px 8px; }
 .overlay.tr .cut { width: 160px; }
 .overlay .lbl { color: var(--gray); font-size: 12px; }
-.banner { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); background: rgba(20,20,20,.92);
+.banner { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); background: rgba(20,20,20,.92);
   border: 1px solid var(--green-dim); border-radius: 4px; padding: 4px 12px; color: var(--glow); font-weight: 600; }
 .drop { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--gray);
   pointer-events: none; }
@@ -125,7 +140,7 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 
 /* shapes, parts, inspector */
 .shapes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-.parts { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; }
+.parts { display: flex; flex-direction: column; gap: 2px; }
 .parts p { margin: 0; }
 .prow { display: flex; justify-content: space-between; gap: 8px; font: inherit; text-align: left; background: none;
   border: 1px solid transparent; border-radius: 3px; color: var(--gray-lt); padding: 3px 6px; cursor: pointer; }
@@ -134,7 +149,6 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .prow.on .pn::before { content: "\25B8 "; }
 .prow.dim .pn { color: var(--gray); font-style: italic; }
 .prow .pt { color: var(--gray); font-size: 11px; font-weight: 400; white-space: nowrap; }
-.inspector { position: absolute; top: 10px; right: 10px; width: 260px; max-height: calc(100% - 70px); overflow-y: auto; }
 .inspector .card { background: var(--panel); }
 .inspector .card h3 { text-transform: capitalize; }
 .name-in { width: 100%; font: 600 13px var(--ui); color: var(--glow); background: var(--black); border: 1px solid var(--border);
@@ -144,12 +158,12 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .row.wrap > .btn { flex: 1 1 auto; }
 .steprow { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 12px; margin-top: 4px; }
 .steprow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.overlay.br { bottom: 10px; right: 10px; background: rgba(20,20,20,.92); border: 1px solid var(--border);
+.overlay.cutbar { bottom: 26px; left: 10px; background: rgba(20,20,20,.92); border: 1px solid var(--border);
   border-radius: 4px; padding: 6px 8px; }
-.overlay.br .cut { display: flex; align-items: center; gap: 6px; }
-.overlay.br .cut .field { margin-top: 0; grid-template-columns: auto 70px; gap: 4px; }
-.overlay.br .cut .field label { color: var(--gray); font-size: 12px; }
-.overlay.br .cut input[type=range] { width: 130px; margin-top: 0; }
+.cutbar .cut { display: flex; align-items: center; gap: 6px; }
+.cutbar .cut .field { margin-top: 0; grid-template-columns: auto 70px; gap: 4px; }
+.cutbar .cut .field label { color: var(--gray); font-size: 12px; }
+.cutbar .cut input[type=range] { width: 130px; margin-top: 0; }
 .colourrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .colourrow .cname { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--gray-lt); }
 .swatch { width: 22px; height: 22px; border-radius: 3px; border: 1px solid var(--gray); }
@@ -168,10 +182,9 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .selbox { position: absolute; display: none; border: 1px dashed var(--glow); background: rgba(125,207,125,.08); pointer-events: none; }
 
 /* status */
-footer { grid-area: stat; display: flex; align-items: center; gap: 12px; padding: 0 10px; background: var(--panel);
-  border-top: 1px solid var(--border); font-size: 12px; color: var(--gray); white-space: nowrap; overflow: hidden; }
-footer .msg { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-footer .mono { font-family: var(--mono); }
+footer { position: absolute; left: 10px; right: 10px; bottom: 3px; display: flex; font-size: 12px; line-height: 18px;
+  color: var(--gray-lt); white-space: nowrap; pointer-events: none; }
+footer .msg { overflow: hidden; text-overflow: ellipsis; background: rgba(10,10,10,.85); border-radius: 3px; padding: 0 6px; pointer-events: auto; }
 
 /* section drawing */
 svg.section { width: 100%; height: 110px; display: block; background: var(--black); border: 1px solid var(--border);

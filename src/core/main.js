@@ -23,7 +23,9 @@ const SHAPES = {
 };
 const LABELS = { x: 'Width', y: 'Depth', z: 'Height', h: 'Height', d: 'Diameter', d1: 'Bottom diameter', d2: 'Top diameter',
   tube: 'Tube', wall: 'Wall', sides: 'Facets', tubeSides: 'Tube facets', r: 'Radius', length: 'Length' };
-const GRID = 1;   // mm per arrow press and drag snap
+const MOVE_STEPS = [0.1, 0.2, 0.3, 0.4, 0.5, 1, 5];
+let moveStep = 1;   // mm per arrow press, drag snap and size handle; picked bottom left of the view
+let plate = { w: 200, d: 200, every: 10 };   // the grid, for this session
 // Part colours are the model's own content (filament colours), not interface colour. Every
 // swatch carries its name and the chosen name is shown as text, so no choice rests on hue.
 const COLOURS = [
@@ -111,8 +113,20 @@ const reopenBtn = button('Reopen', () => reopenLast(), { small: true, title: 'Re
 reopenBtn.style.display = 'none';
 const btnUndo = button('Undo', () => undo(), { title: 'Ctrl+Z' });
 const btnRedo = button('Redo', () => redo(), { title: 'Ctrl+Y' });
+// grid: width, depth and line spacing, in a small panel under its button
+const gridPop = h('div', { class: 'card pop', style: 'display:none' });
+function showGridPop(on) {
+  gridPop.style.display = on ? '' : 'none';
+  if (!on) return;
+  const set = (k, v) => { plate = { ...plate, [k]: v }; viewer.setPlate(plate); status(`Grid ${+plate.w.toFixed(2)} x ${+plate.d.toFixed(2)} mm, a line every ${+plate.every.toFixed(2)} mm.`); };
+  gridPop.replaceChildren(h('h3', {}, 'Grid'),
+    ui.numfield('Width', plate.w, 'mm', v => set('w', v), { min: 10, max: 5000, step: 10, lazy: true, digits: 1 }),
+    ui.numfield('Depth', plate.d, 'mm', v => set('d', v), { min: 10, max: 5000, step: 10, lazy: true, digits: 1 }),
+    ui.numfield('Line every', plate.every, 'mm', v => set('every', v), { min: 0.5, max: 500, step: 1, lazy: true, digits: 1 }),
+    h('div', { class: 'note' }, 'Kept for this session.'),
+    h('div', { class: 'row' }, button('Done', () => showGridPop(false), { small: true })));
+}
 const header = h('header', {},
-  h('span', { class: 'name' }, 'Workingtitle3D'),
   button('New', () => newProject(), { title: 'Start an empty project' }),
   button('Open', () => openProject(), { title: 'Open a project folder' }),
   button('Import', () => importInput.click(), { title: 'Add an STL, 3MF or OBJ as a part (Ctrl+I is intersect)' }),
@@ -120,6 +134,7 @@ const header = h('header', {},
   button('Export', () => exportModel(), { title: 'Join every solid part into one closed solid, into exports/ (Ctrl+E)' }),
   button('Export as...', () => exportModel(true), { title: 'Export to a place you pick (Ctrl+Shift+E)' }),
   btnUndo, btnRedo,
+  h('span', { class: 'popwrap' }, button('Grid', () => showGridPop(gridPop.style.display === 'none'), { title: 'Grid size and line spacing' }), gridPop),
   h('span', { class: 'spacer' }), projLabel, reopenBtn, projBtn, importInput);
 
 const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => {
@@ -128,10 +143,17 @@ const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => 
 }));
 const partList = h('div', { class: 'parts' });
 const stepCard = h('div');
-const aside = h('aside', {}, card('Shapes', shapeGrid), card('Parts', partList), stepCard);
+const inspector = h('div', { class: 'inspector', style: 'display:none' });
+// one panel on the right, full height, in two tabs that scroll: Shapes (the shapes, then the
+// tool step and the selected part's options) and Parts (the parts list)
+const panes = { shapes: h('div', { class: 'pane' }, card('Shapes', shapeGrid), stepCard, inspector),
+  parts: h('div', { class: 'pane', style: 'display:none' }, card('Parts', partList)) };
+const tabs = seg([['shapes', 'Shapes'], ['parts', 'Parts']], 'shapes', v => showTab(v));
+tabs.classList.add('tabs');
+function showTab(v) { tabs.set(v); for (const [k, el] of Object.entries(panes)) el.style.display = k === v ? '' : 'none'; }
+const aside = h('aside', {}, h('div', { class: 'panehead' }, h('div', { class: 'appname' }, 'Workingtitle3D'), tabs), panes.shapes, panes.parts);
 
 const view = h('div', { id: 'view' });
-const inspector = h('div', { class: 'inspector', style: 'display:none' });
 const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF or OBJ here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
 let cutAxis = null, cutAt = 50;
 const cutRange = ui.slider('at', cutAt, '%', { min: 0, max: 100, step: 0.5, digits: 1 }, v => { cutAt = v; if (cutAxis) viewer.setClip(cutAxis, v / 100); });
@@ -139,13 +161,23 @@ cutRange.classList.add('cut');
 const cutSeg = seg([['off', 'Off'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']], 'off', v => { cutAxis = v === 'off' ? null : v; viewer.setClip(cutAxis, cutAt / 100); });
 const views = h('div', { class: 'overlay tl' },
   ...[['iso', 'Fit (F)'], ['top', 'Top'], ['front', 'Front'], ['right', 'Right']].map(([k, l]) => button(l, () => viewer.view(k, k === 'iso' ? sel : []), { small: true })));
-const cut = h('div', { class: 'overlay br' }, h('span', { class: 'lbl' }, 'Cut'), cutSeg, cutRange);
+cutSeg.title = 'Cut the view open along X, Y or Z';
+const cut = h('div', { class: 'overlay cutbar' }, cutSeg, cutRange);
 const pastBanner = h('div', { class: 'banner', style: 'display:none' });
-view.append(dropHint, views, cut, inspector, pastBanner);
-
+// move step: one column of buttons, bottom left
+const moveBtns = MOVE_STEPS.map(v => h('button', { type: 'button', class: 'movestep' + (v === moveStep ? ' on' : ''),
+  title: `Move in ${v} mm steps (arrows, drag)`, onclick: () => setMoveStep(v) }, v.toFixed(1)));
+const moveCol = h('div', { class: 'overlay bl' }, h('span', { class: 'lbl' }, 'mm'), ...moveBtns);
+function setMoveStep(v) {
+  moveStep = v;
+  moveBtns.forEach((b, i) => b.classList.toggle('on', MOVE_STEPS[i] === v));
+  status(`Moves go in ${v} mm steps. Shift + arrow: ${+(v * 10).toFixed(2)} mm.`);
+  renderInspector();
+}
+// status: one thin line along the bottom of the view, no bar
 const statusMsg = h('span', { class: 'msg' }, 'Ready.');
-const statusRight = h('span', { class: 'mono' });
-app.append(header, aside, view, h('footer', {}, statusMsg, statusRight));
+view.append(header, dropHint, views, cut, moveCol, pastBanner, h('footer', {}, statusMsg));
+app.append(view, aside);
 
 const viewer = new Viewer(view);
 
@@ -291,7 +323,7 @@ function renderInspector() {
   if (wb) {
     const at = [(wb.min.x + wb.max.x) / 2, (wb.min.y + wb.max.y) / 2, wb.min.z];
     [['Centre X', 0], ['Centre Y', 1], ['Bottom Z', 2]].forEach(([label, i]) => body.push(ui.numfield(label, +at[i].toFixed(4), 'mm',
-      v => upd(`Move ${p.name}`, q => { q.xform.pos[i] = +(q.xform.pos[i] + v - at[i]).toFixed(6); }), { step: 1, lazy: true, digits: 3 })));
+      v => upd(`Move ${p.name}`, q => { q.xform.pos[i] = +(q.xform.pos[i] + v - at[i]).toFixed(6); }), { step: moveStep, lazy: true, digits: 3 })));
   }
   body.push(h('div', { class: 'sub' }, 'Rotation (about its middle)'));
   ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.rot[i], 'deg',
@@ -389,13 +421,13 @@ viewer.onDragStart = (id, e) => {
 };
 viewer.onDrag = (dx, dy, e) => {
   if (!drag) return;
-  const snap = e.shiftKey ? 0.1 : GRID;
-  drag.d = [Math.round(dx / snap) * snap, Math.round(dy / snap) * snap];
+  const snap = e.shiftKey ? 0.1 : moveStep;
+  drag.d = [+(Math.round(dx / snap) * snap).toFixed(6), +(Math.round(dy / snap) * snap).toFixed(6)];
   for (const id of drag.ids) {
     const p = doc.top(id), s = drag.start.get(id);
     viewer.setXform(id, { ...p.xform, pos: [s[0] + drag.d[0], s[1] + drag.d[1], s[2]] });
   }
-  status(`Move ${mm(drag.d[0])}, ${mm(drag.d[1])} mm${e.shiftKey ? '' : '  (Shift: 0.1 mm steps)'}`);
+  status(`Move ${mm(drag.d[0])}, ${mm(drag.d[1])} mm${e.shiftKey || moveStep <= 0.1 ? '' : '  (Shift: 0.1 mm steps)'}`);
 };
 viewer.onDragEnd = () => {
   if (!drag) return;
@@ -496,6 +528,8 @@ function startStep(t, partId) {
   const applyBtn = button('Apply', () => applyStep(), { go: true });
   const row = h('div', { class: 'row' }, button('Preview', () => previewStep()), applyBtn, button('Cancel', () => cancelStep()));
   stepCard.replaceChildren(card(`${t.title}: ${p.name}`, t.blurb ? h('p', {}, t.blurb) : null, body, statusEl, prog, row));
+  showTab('shapes');
+  stepCard.scrollIntoView({ block: 'nearest' });
   const m = meshes.get(partId);
   const lb = m ? localBounds(m.tris) : null;
   const api = {
@@ -663,8 +697,6 @@ function updateHeader() {
     projLabel.textContent = doc.history.length ? 'not saved to disk' : '';
     projBtn.style.display = doc.history.length ? '' : 'none';
   }
-  const tris = [...meshes.entries()].filter(([k]) => k !== 'preview').reduce((s, [, m]) => s + (m ? m.tris.length / 9 : 0), 0);
-  statusRight.textContent = doc.parts.length ? `${doc.parts.length} parts  ${count(tris)} tris` : '';
 }
 
 function watch(p) {
@@ -688,7 +720,7 @@ async function noFolderAccess() {
 /** The home folder, ready to write. Call from a click: it may need to ask. */
 async function ensureHome() {
   if (home) return home;
-  if (await noFolderAccess()) return null;
+  if (await noFolderAccess()) return false;
   const saved = await folders.savedHome();
   try {
     if (saved.home && saved.state === 'granted') return (home = saved.home);
@@ -704,7 +736,11 @@ async function ensureHome() {
     if (!go) return null;
     home = await folders.pickHome();
     return home;
-  } catch (err) { if (err.name !== 'AbortError') status(err.message, true); return null; }
+  } catch (err) {
+    if (err.name === 'AbortError') return null;
+    status(`Could not use that folder: ${err.message}`, true);
+    return false;   // an error, already shown
+  }
 }
 
 /** In-page dialog asking for a project name. */
@@ -733,7 +769,8 @@ async function askForFolder() { await saveToProjects(); }
 
 /** Save the current parts as a new named project under projects/. */
 async function saveToProjects() {
-  if (!(await ensureHome())) { status('Not saved to disk yet. "Save as project" (top right) when ready.'); return; }
+  const got = await ensureHome();
+  if (!got) { if (got === null) status('Not saved to disk yet. "Save as project" (top right) when ready.'); return; }
   const taken = await folders.listProjects(home);
   let name = await askName('Name this project. Every step is saved in projects/ as you work.', await nextUntitled());
   while (name && taken.includes(name)) name = await askName(`"${name}" already exists. Pick another name.`, name + ' 2');
@@ -907,18 +944,18 @@ window.addEventListener('keydown', e => {
   if (c && k === 'v') return act(paste);
   if (c && k === 'e') return act(() => exportModel(s));
   if (c && k === 'o') return act(openProject);
-  if (c && (k === 'arrowup' || k === 'arrowdown')) return act(() => nudge(0, 0, (k === 'arrowup' ? 1 : -1) * (s ? 10 : GRID)));
+  if (c && (k === 'arrowup' || k === 'arrowdown')) return act(() => nudge(0, 0, (k === 'arrowup' ? 1 : -1) * moveStep * (s ? 10 : 1)));
   if (c) return;
   if (k.startsWith('arrow')) return act(() => {
     // follow the view: the part moves the way the arrow points on screen
     const b = viewer.bounds(sel);
     const ax = viewer.screenAxes(b ? b.getCenter(b.min.clone()) : null);
     const dir = { arrowright: ax.right, arrowleft: ax.right.map(v => -v), arrowup: ax.up, arrowdown: ax.up.map(v => -v) }[k];
-    const d = s ? 10 : GRID;
+    const d = moveStep * (s ? 10 : 1);
     nudge(dir[0] * d, dir[1] * d, 0);
   });
   if (k === 'delete' || k === 'backspace') return act(deleteSel);
-  if (k === 'escape') return act(() => { if (step) cancelStep(); else if (past) endPast(); else setSel([]); });
+  if (k === 'escape') return act(() => { if (gridPop.style.display !== 'none') showGridPop(false); else if (step) cancelStep(); else if (past) endPast(); else setSel([]); });
   if (k === 'f') return act(() => viewer.view(null, sel));
   if (k === 'h') return act(() => setHole(true));
   if (k === 's') return act(() => setHole(false));

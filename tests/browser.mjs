@@ -6,6 +6,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
 import { extrude, rect, circle } from './shapes.mjs';
 import { writeSTL, readSTL } from '../src/core/meshio.js';
 import { report, describe } from '../src/core/meshcheck.js';
@@ -43,8 +44,9 @@ const browser = await puppeteer.launch({
 });
 let fail = 0;
 const errors = [];
+let page, server;
 try {
-  const page = await browser.newPage();
+  page = await browser.newPage();
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errors.push(`console.${m.type()}: ${m.text()}`); });
   await page.setViewport({ width: 1366, height: 768 });
@@ -167,7 +169,10 @@ try {
   await click('.btn', 'Top'); await sleep(300);
   const a0 = await posOf();
   await page.click('#view canvas', { offset: { x: 5, y: 5 } }).catch(() => {});
+  await click('.tabs button', 'Parts');
   await click('.prow', 'plateRedsolid').catch(async () => { const r = await page.$$('.prow'); await r[r.length - 1].click(); });
+  await shot('4b-parts-tab');
+  await click('.tabs button', 'Shapes');
   await keys('ArrowRight');
   const a1 = await posOf();
   await click('.btn', 'Right'); await sleep(300);
@@ -190,6 +195,25 @@ try {
   const b2 = await posOf();
   // seen from below, a part nearer the viewer sits higher on screen, so up = toward the viewer (-Y)
   step('arrows from below', b1[0] - b0[0] === 1 && b2[1] - b1[1] === -1, `${b0} -> ${b1} -> ${b2}`);
+
+  // move step 0.5 mm: an arrow moves 0.5, Shift + arrow 5; then back to 1.0
+  await click('.movestep', '0.5');
+  const m0 = await posOf();
+  await keys('ArrowRight');
+  const m1 = await posOf();
+  await keys('Shift', 'ArrowRight');
+  const m2 = await posOf();
+  await click('.movestep', '1.0');
+  step('move step', Math.abs(m1[0] - m0[0] - 0.5) < 1e-6 && Math.abs(m2[0] - m1[0] - 5) < 1e-6, `${m0} -> ${m1} -> ${m2}`);
+
+  // grid size from the header
+  await click('header .btn', 'Grid');
+  const wIn = await page.evaluateHandle(() => [...document.querySelectorAll('.pop .field')].find(f => f.querySelector('label').textContent === 'Width').querySelector('input'));
+  await wIn.click(); await wIn.type('300'); await wIn.press('Enter');
+  const gs = await waitStatus(/Grid \d/, 5000).catch(() => '');
+  await shot('5b-grid');
+  await click('.pop .btn', 'Done');
+  step('grid size', /Grid 300 x 200 mm/.test(gs), gs);
 
   // a small box that only clips the edge of a part selects it
   await click('.btn', 'Top'); await sleep(300);
@@ -232,11 +256,15 @@ try {
   step('D drops the rotated part onto the plate', Math.abs(await fv('Bottom Z')) < 1e-3, `bottom Z ${await fv('Bottom Z')}`);
 
   // projects: home folder picked once, project named, reopened by itself after a reload.
-  // The picker is stood in by the browser's private storage, so no dialog is needed.
+  // The picker is stood in by the browser's private storage, so no dialog is needed. That
+  // storage is refused to file:// pages, so this part loads the same page from 127.0.0.1.
   await page.evaluateOnNewDocument(() => {
     window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('home', { create: true });
   });
-  await page.reload();
+  const html = readFileSync(join(ROOT, 'dist', 'Workingtitle3D.html'));
+  server = createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end(html); });
+  await new Promise(ok => server.listen(0, '127.0.0.1', ok));
+  await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await sleep(800);
   await click('.shapes .btn', 'Box');
   await page.waitForSelector('dialog[open]');
@@ -271,9 +299,13 @@ try {
   step('export + read back', r.watertight, `${r.triangles} tris  ${describe(r)}  vol ${r.volume.toFixed(0)}`);
 } catch (e) {
   fail++;
-  console.log('FAIL ' + e.message);
+  const st = await page.$eval('footer .msg', e => e.textContent).catch(() => '');
+  await page.screenshot({ path: join(OUT, 'fail.png') }).catch(() => {});
+  console.log('FAIL ' + e.message + (st ? `  (status: ${st})` : ''));
 } finally {
   await browser.close();
+  server?.close();
 }
 for (const e of errors) console.log('  ' + e);
 console.log(fail || errors.length ? `${fail} FAILED, ${errors.length} page errors` : 'all passed');
+if (fail || errors.length) process.exitCode = 1;
