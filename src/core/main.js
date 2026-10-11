@@ -129,14 +129,15 @@ const aside = h('aside', {}, card('Shapes', shapeGrid), card('Parts', partList),
 const view = h('div', { id: 'view' });
 const inspector = h('div', { class: 'inspector', style: 'display:none' });
 const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF or OBJ here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
-const cutRange = h('input', { type: 'range', min: 0, max: 1000, value: 500, class: 'cut' });
-let cutAxis = null;
-const cutSeg = seg([['off', 'Off'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']], 'off', v => { cutAxis = v === 'off' ? null : v; viewer.setClip(cutAxis, cutRange.value / 1000); });
-cutRange.addEventListener('input', () => { if (cutAxis) viewer.setClip(cutAxis, cutRange.value / 1000); });
+let cutAxis = null, cutAt = 50;
+const cutRange = ui.slider('at', cutAt, '%', { min: 0, max: 100, step: 0.5, digits: 1 }, v => { cutAt = v; if (cutAxis) viewer.setClip(cutAxis, v / 100); });
+cutRange.classList.add('cut');
+const cutSeg = seg([['off', 'Off'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']], 'off', v => { cutAxis = v === 'off' ? null : v; viewer.setClip(cutAxis, cutAt / 100); });
 const views = h('div', { class: 'overlay tl' },
   ...[['iso', 'Fit (F)'], ['top', 'Top'], ['front', 'Front'], ['right', 'Right']].map(([k, l]) => button(l, () => viewer.view(k, k === 'iso' ? sel : []), { small: true })));
 const cut = h('div', { class: 'overlay br' }, h('span', { class: 'lbl' }, 'Cut'), cutSeg, cutRange);
-view.append(dropHint, views, cut, inspector);
+const pastBanner = h('div', { class: 'banner', style: 'display:none' });
+view.append(dropHint, views, cut, inspector, pastBanner);
 
 const statusMsg = h('span', { class: 'msg' }, 'Ready.');
 const statusRight = h('span', { class: 'mono' });
@@ -161,6 +162,7 @@ bindDoc();
 let syncing = 0;
 /** Bring meshes, view, lists and inspector up to date with the doc. */
 async function refresh() {
+  endPast(false);   // any change to the model ends the history view
   sel = sel.filter(id => doc.top(id));
   renderParts();
   renderInspector();
@@ -196,6 +198,7 @@ async function sendBlobs() {
 }
 
 function setSel(ids) {
+  endPast(false);
   sel = ids.filter(id => doc.top(id));
   viewer.select(sel);
   renderParts();
@@ -258,6 +261,19 @@ function renderInspector() {
     seg([['solid', 'Solid'], ['hole', 'Hole']], p.hole ? 'hole' : 'solid', v => upd(v === 'hole' ? `${p.name} to hole` : `${p.name} to solid`, q => { q.hole = v === 'hole'; })),
   ];
   if (!p.hole) body.push(colourPicker(p.color, hex => upd(`${p.name} colour: ${colourName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; })));
+  // history of this part: drag through it to watch it being made; Keep rolls it back
+  const tl = doc.timeline(p.id);
+  if (tl.length > 1) {
+    const n = tl.length, at = past?.id === p.id ? past.k : n;
+    const label = h('div', { class: 'note' });
+    const keep = button('Keep this', () => keepPast(), { small: true, title: 'Roll this part back to the step shown' });
+    const back = button('Back to now', () => endPast(), { small: true });
+    pastUi = { label, keep, back, n, tl, id: p.id };
+    body.push(h('div', { class: 'sub' }, 'History'),
+      ui.slider(`Step (of ${n})`, at, '', { min: 1, max: n, step: 1 }, k => scrubTo(k)),
+      label, h('div', { class: 'row' }, back, keep));
+    pastLabel(at);
+  } else pastUi = null;
   if (p.params) {
     for (const [k, v] of Object.entries(p.params)) {
       const facets = k === 'sides' || k === 'tubeSides';
@@ -288,20 +304,63 @@ function renderInspector() {
       button('Remove', () => upd(`Remove step ${i + 1} from ${p.name}`, q => { q.ops.splice(i, 1); }), { small: true })));
   });
   body.push(h('div', { class: 'row wrap' }, ...tools.map(t => button(t.title, () => startStep(t, p.id), { small: true, title: t.blurb }))));
-  // history of this part
-  const hist = doc.partHistory(p.id).slice(0, 6);
-  if (hist.length > 1) {
-    body.push(h('div', { class: 'sub' }, 'Roll back this part'));
-    for (const e of hist.slice(0, -1)) {
-      body.push(h('div', { class: 'steprow' }, h('span', { title: e.cmd.label }, 'before: ' + e.cmd.label), button('Roll back', () => { doc.rollbackPart(p.id, e.cmd); status(`${p.name} rolled back.`); }, { small: true })));
-    }
-  }
   if (m) {
     const b = wb;
     body.push(kv([['size', b ? `${mm(b.max.x - b.min.x)} x ${mm(b.max.y - b.min.y)} x ${mm(b.max.z - b.min.z)}` : '-'], ['volume', `${(m.volume / 1000).toFixed(2)} cm3`], ['triangles', count(m.tris.length / 9)]]));
   }
   if (lock) body.push(h('div', { class: 'note' }, 'Locked: Ctrl+L to unlock.'));
   inspector.replaceChildren(card(p.kind === 'group' ? `Group${p.mode === 'intersect' ? ' (intersect)' : ''}` : p.kind, ...body));
+}
+
+// ---- history view ---------------------------------------------------------------------------
+let past = null;     // {id, k, t, shown} while looking at an earlier step
+let pastUi = null;
+let pastSeq = 0;
+function pastLabel(k) {
+  if (!pastUi) return;
+  const { n, tl, label, keep, back } = pastUi;
+  label.textContent = k >= n ? 'Now.' : `After step ${tl[k - 1]}: ${doc.history[tl[k - 1] - 1].label}`;
+  back.disabled = k >= n;
+  keep.disabled = k >= n || !past?.ownState;
+  if (k < n && past && !past.ownState) label.textContent += '  (before this part existed as one piece: Ctrl+Z goes back that far)';
+  pastBanner.style.display = k < n ? '' : 'none';
+  pastBanner.textContent = `HISTORY  -  step ${k} of ${n}. Esc returns to now.`;
+}
+async function scrubTo(k) {
+  if (!pastUi) return;
+  const { n, tl, id } = pastUi;
+  k = Math.max(1, Math.min(n, Math.round(k)));
+  if (k >= n) { endPast(false); pastLabel(n); return; }   // no redraw: the slider is still being dragged
+  const t = tl[k - 1], my = ++pastSeq;
+  const ids = new Set(doc.idsIn(doc.top(id)));
+  const shown = doc.partsAt(t).filter(q => !q.hidden && doc.idsIn(q).some(x => ids.has(x)));
+  past = { id, k, t, ownState: shown.find(q => q.id === id) || null };
+  pastLabel(k);
+  try {
+    await sendBlobs();
+    const items = [];
+    for (const q of shown) {
+      const r = await pool.call('kern', { type: 'mesh', part: q });
+      items.push({ tris: r.tris, xform: q.xform, color: q.color, hole: q.hole });
+    }
+    if (my === pastSeq && past) viewer.showPast(items);
+  } catch (err) { status(err.message, true); }
+}
+function endPast(redraw = true) {
+  if (!past && !viewer.past) return;
+  past = null;
+  pastSeq++;
+  pastBanner.style.display = 'none';
+  viewer.showPast(null);
+  if (redraw) renderInspector();
+}
+function keepPast() {
+  if (!past?.ownState) return;
+  const { id, k } = past, name = doc.top(id)?.name;
+  const state = past.ownState;
+  endPast();
+  doc.setPart(id, state, `Roll ${name} back to history step ${k}`);
+  status(`${name} rolled back to step ${k}. Ctrl+Z undoes that.`);
 }
 
 // ---- selection and editing ----------------------------------------------------------------------
@@ -777,7 +836,7 @@ window.addEventListener('keydown', e => {
     nudge(dir[0] * d, dir[1] * d, 0);
   });
   if (k === 'delete' || k === 'backspace') return act(deleteSel);
-  if (k === 'escape') return act(() => { if (step) cancelStep(); else setSel([]); });
+  if (k === 'escape') return act(() => { if (step) cancelStep(); else if (past) endPast(); else setSel([]); });
   if (k === 'f') return act(() => viewer.view(null, sel));
   if (k === 'h') return act(() => setHole(true));
   if (k === 's') return act(() => setHole(false));

@@ -120,6 +120,23 @@ try {
   await sleep(800);
   step('redo brings it back', (await vol()) === v2);
 
+  // history slider: step 1 shows the first box (the group did not exist yet, so no Keep);
+  // the step before the fillet can be kept, which rolls the group back; Ctrl+Z undoes it
+  const n = await page.$$eval('.inspector .slider input[type=range]', r => +r[0].max);
+  await field('Step (of ' + n + ')', 1);
+  const lab1 = await page.$eval('.inspector .slider + .note', e => e.textContent);
+  const keepOff1 = await page.evaluate(() => [...document.querySelectorAll('.inspector .btn')].find(b => b.textContent === 'Keep this').disabled);
+  await shot('3b-history-step1');
+  await field('Step (of ' + n + ')', n - 1);
+  const keepOff2 = await page.evaluate(() => [...document.querySelectorAll('.inspector .btn')].find(b => b.textContent === 'Keep this').disabled);
+  await click('.inspector .btn', 'Keep this');
+  await sleep(800);
+  const vk = await vol();
+  step('history slider', /Add Box 1/.test(lab1) && keepOff1 && !keepOff2 && vk === v1, `${n} steps; step 1: "${lab1.slice(0, 40)}"; kept vol ${vk} (want ${v1})`);
+  await keys('Control', 'z');
+  await sleep(800);
+  step('undo the keep', (await vol()) === v2);
+
   // import, drag
   await (await page.$('input[type=file]')).uploadFile(part);
   await waitStatus(/Imported|ERROR/);

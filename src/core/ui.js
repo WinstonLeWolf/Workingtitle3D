@@ -76,6 +76,19 @@ export function numfield(label, value, unit, onchange, { min = -Infinity, max = 
   return el;
 }
 
+/** Slider with a number box to type the exact value; the two stay in step.
+ *  oninput fires while dragging; onchange once the value settles (release, Enter, blur). */
+export function slider(label, value, unit, { min = 0, max = 100, step = 1, digits = 0 } = {}, oninput, onchange = oninput) {
+  const range = h('input', { type: 'range', min, max, step, value });
+  let box;
+  box = numfield(label, value, unit, v => { range.value = v; oninput(v); onchange(v); }, { min, max, step, digits, lazy: true });
+  range.addEventListener('input', () => { box.set(+range.value); oninput(+range.value); });
+  range.addEventListener('change', () => onchange(+range.value));
+  const el = h('div', { class: 'slider' }, box, range);
+  el.set = v => { range.value = v; box.set(v); };
+  return el;
+}
+
 export function check(label, value, onchange) {
   const box = h('input', { type: 'checkbox' });
   box.checked = !!value;

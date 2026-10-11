@@ -13,6 +13,15 @@ export function shapeKey(p) {
   }
   return p.kind + JSON.stringify(p.params || {}) + (p.blob || '') + JSON.stringify(p.ops || []);
 }
+/** Top-level parts after one command, run forward (dir 1) or back (dir -1). */
+function applyCmd(list, cmd, dir) {
+  const parts = dir > 0 ? cmd.after : cmd.before;
+  const order = dir > 0 ? cmd.afterOrder : cmd.beforeOrder;
+  const map = new Map(list.map(p => [p.id, p]));
+  for (const id of cmd.touched) { if (parts[id]) map.set(id, clone(parts[id])); else map.delete(id); }
+  return order.map(id => map.get(id)).filter(Boolean);
+}
+
 export const IDENT = () => ({ pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] });
 
 export function matrix(x) {
@@ -98,12 +107,35 @@ export class Doc {
     return ret;
   }
 
-  apply(cmd, dir) {
-    const parts = dir > 0 ? cmd.after : cmd.before;
-    const order = dir > 0 ? cmd.afterOrder : cmd.beforeOrder;
-    const map = new Map(this.parts.map(p => [p.id, p]));
-    for (const id of cmd.touched) { if (parts[id]) map.set(id, clone(parts[id])); else map.delete(id); }
-    this.parts = order.map(id => map.get(id)).filter(Boolean);
+  apply(cmd, dir) { this.parts = applyCmd(this.parts, cmd, dir); }
+
+  /** Every part id inside a part, itself included. */
+  idsIn(part) { return [part.id, ...(part.children || []).flatMap(c => this.idsIn(c))]; }
+
+  /** The steps (1-based counts into history) at which this part, or anything now inside
+   *  it, changed - so a group's timeline shows its pieces being made and put together. */
+  timeline(id) {
+    const p = this.top(id);
+    if (!p) return [];
+    const ids = new Set(this.idsIn(p));
+    const out = [];
+    for (let i = 0; i < this.at; i++) if (this.history[i].touched.some(t => ids.has(t))) out.push(i + 1);
+    return out;
+  }
+
+  /** Top-level parts as they stood after the first t steps. */
+  partsAt(t) {
+    let parts = [];
+    for (let i = 0; i < t; i++) parts = applyCmd(parts, this.history[i], 1);
+    return parts;
+  }
+
+  /** Set one top-level part to an earlier state of itself, as one new step. */
+  setPart(id, state, label) {
+    return this.commit(label, parts => {
+      const i = parts.findIndex(p => p.id === id);
+      if (i >= 0) parts[i] = clone(state);
+    });
   }
 
   undo() {

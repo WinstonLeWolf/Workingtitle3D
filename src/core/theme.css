@@ -146,7 +146,10 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .steprow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .overlay.br { bottom: 10px; right: 10px; background: rgba(20,20,20,.92); border: 1px solid var(--border);
   border-radius: 4px; padding: 6px 8px; }
-.overlay.br .cut { width: 140px; }
+.overlay.br .cut { display: flex; align-items: center; gap: 6px; }
+.overlay.br .cut .field { margin-top: 0; grid-template-columns: auto 70px; gap: 4px; }
+.overlay.br .cut .field label { color: var(--gray); font-size: 12px; }
+.overlay.br .cut input[type=range] { width: 130px; margin-top: 0; }
 .colourrow { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .colourrow .cname { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--gray-lt); }
 .swatch { width: 22px; height: 22px; border-radius: 3px; border: 1px solid var(--gray); }
@@ -159,6 +162,7 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .hex-in { flex: 1; font: 12px var(--mono); color: var(--glow); background: var(--black); border: 1px solid var(--border);
   border-radius: 3px; padding: 3px 6px; outline: 0; }
 .hex-in.bad { border-color: var(--yellow); }
+.slider input[type=range] { margin-top: 4px; }
 .selbox { position: absolute; display: none; border: 1px dashed var(--glow); background: rgba(125,207,125,.08); pointer-events: none; }
 
 /* status */

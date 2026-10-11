@@ -258,6 +258,28 @@ export class Viewer {
     obj.scale.set(...(x?.scale || [1, 1, 1]));
   }
 
+  /** History view: show these parts instead of the live scene, or null to go back.
+   *  items: [{tris, xform, color, hole}] in each part's own frame. */
+  showPast(items) {
+    if (this.past) { this.past.traverse(c => { c.geometry?.dispose(); if (c.material && c.material !== this.mats.hole && c.material !== this.mats.inside) c.material.dispose(); }); this.scene.remove(this.past); this.past = null; }
+    this.root.visible = !items;
+    if (items) {
+      this.past = new THREE.Group();
+      for (const it of items) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(it.tris, 3));
+        g.computeVertexNormals();
+        const grp = new THREE.Group();
+        grp.add(new THREE.Mesh(g, it.hole ? this.mats.hole : new THREE.MeshLambertMaterial({ color: it.color || C.body, flatShading: true })));
+        if (!it.hole) grp.add(new THREE.Mesh(g, this.mats.inside));
+        this.place(grp, it.xform);
+        this.past.add(grp);
+      }
+      this.scene.add(this.past);
+    }
+    this.request();
+  }
+
   /** Move a part's display without a rebuild (live drag). */
   setXform(id, x) { const o = this.objs.get(id); if (o) { this.place(o.group, x); this.request(); } }
 
