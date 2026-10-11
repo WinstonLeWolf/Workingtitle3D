@@ -176,11 +176,32 @@ function setMoveStep(v) {
 }
 // status: one thin line along the bottom of the view, no bar
 const statusMsg = h('span', { class: 'msg' }, 'Ready.');
-view.append(header, dropHint, views, cut, moveCol, pastBanner, h('footer', {}, statusMsg));
+const fatal = h('div', { class: 'fatal', style: 'display:none' });
+view.append(header, dropHint, views, cut, moveCol, pastBanner, fatal, h('footer', {}, statusMsg));
 app.append(view, aside);
+function showFatal(text) {
+  fatal.replaceChildren(h('p', { class: 'err' }, text), button('Reload', () => location.reload()));
+  fatal.style.display = '';
+}
 
-const viewer = new Viewer(view);
+// The view needs WebGL. A browser that refuses it (often after a driver reset on resume
+// from sleep) would otherwise leave a page that looks ready and does nothing.
+let viewer;
+try { viewer = new Viewer(view); }
+catch (e) {
+  showFatal('The browser will not give this page 3D graphics. That usually follows a graphics driver reset, often on resume from sleep. Close every window of the browser, open it again, then reload.');
+  throw e;
+}
 view.viewer = viewer;   // for the browser test
+let lostTimer = 0;
+viewer.onContext = ok => {
+  clearTimeout(lostTimer);
+  if (ok) { fatal.style.display = 'none'; status('The 3D view is back.'); return; }
+  status('The graphics driver reset. Waiting for the 3D view to come back.');
+  lostTimer = setTimeout(() => showFatal('The 3D view did not come back after a graphics driver reset. '
+    + (project ? 'Every step is already in the project folder. ' : 'Save as a project first, or the parts go with the reload. ')
+    + 'If reloading does not bring it back, close every window of the browser and open it again.'), 4000);
+};
 
 function status(text, error = false) {
   statusMsg.textContent = text;

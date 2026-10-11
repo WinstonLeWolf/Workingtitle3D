@@ -133,6 +133,9 @@ input[type=checkbox]:checked::after { content: ""; width: 7px; height: 4px; bord
 .overlay .lbl { color: var(--gray); font-size: 12px; }
 .banner { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); background: rgba(20,20,20,.92);
   border: 1px solid var(--green-dim); border-radius: 4px; padding: 4px 12px; color: var(--glow); font-weight: 600; }
+.fatal { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); max-width: 420px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 10px 14px; }
+.fatal p { margin: 0 0 8px; line-height: 1.4; }
 .drop { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--gray);
   pointer-events: none; }
 .drop b { display: block; color: var(--gray-lt); font-size: 16px; font-weight: 600; margin-bottom: 4px; }

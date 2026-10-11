@@ -21,6 +21,13 @@ export class Viewer {
     el.appendChild(this.renderer.domElement);
     const dom = this.renderer.domElement;
     dom.tabIndex = 0;
+    // A driver reset (often on resume from sleep) loses the GL context. three.js keeps it
+    // restorable and rebuilds its GPU state on restore; nothing redraws unless asked.
+    this.lost = false;
+    dom.addEventListener('webglcontextlost', () => { this.lost = true; this.onContext?.(false); });
+    dom.addEventListener('webglcontextrestored', () => { this.lost = false; this.onContext?.(true); this.request(); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.request(); });
+    window.addEventListener('pageshow', () => this.request());
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(35, 1, 0.5, 20000);
@@ -200,6 +207,7 @@ export class Viewer {
     this.pending = true;
     requestAnimationFrame(() => {
       this.pending = false;
+      if (this.lost) return;
       this.controls.update();
       if (this.clipOn) this.updateClip();
       this.updateHandles();

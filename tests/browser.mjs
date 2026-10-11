@@ -385,6 +385,25 @@ try {
   });
   step('rename the project', /Renamed case/.test(after.label) && after.names.includes('Renamed case') && !after.names.includes('Test case') && /Sphere/.test(after.lastStep),
     `${rn.slice(0, 50)} | ${after.names.join(', ')} | ${after.label}`);
+
+  // a driver reset (resume from sleep) loses the GL context: say so, then redraw on restore
+  await page.evaluate(() => { window._lc = document.querySelector('#view canvas').getContext('webgl2').getExtension('WEBGL_lose_context'); window._lc.loseContext(); });
+  const lostMsg = await waitStatus(/graphics driver reset/);
+  await page.evaluate(() => window._lc.restoreContext());
+  const backMsg = await waitStatus(/view is back/);
+  await sleep(300);
+  await page.screenshot({ path: join(OUT, 'restored.png') });
+  step('GL context lost and restored', /driver reset/.test(lostMsg) && /back/.test(backMsg), backMsg);
+
+  // a browser that refuses WebGL at load says so instead of looking ready
+  const nogl = await browser.newPage();
+  await nogl.evaluateOnNewDocument(() => { const g = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (t, ...a) { return /webgl/.test(t) ? null : g.call(this, t, ...a); }; });
+  await nogl.goto(pathToFileURL(join(ROOT, 'dist', 'Workingtitle3D.html')).href);
+  await sleep(1000);
+  const fat = await nogl.$eval('.fatal', e => e.style.display !== 'none' && e.textContent).catch(() => '');
+  await nogl.close();
+  step('no WebGL at load shows the error', /3D graphics/.test(fat), fat.slice(0, 60));
 } catch (e) {
   fail++;
   const st = await page.$eval('footer .msg', e => e.textContent).catch(() => '');
