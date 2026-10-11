@@ -1006,8 +1006,8 @@ window.addEventListener('keydown', e => {
   if (k === 'm') return act(() => mirrorSel(s ? 1 : e.altKey ? 2 : 0));
   if (k === '+' || k === '=') return act(() => zoom(0.8));
   if (k === '-' || k === '_') return act(() => zoom(1.25));
-  if (k === 'w' || k === 'r' || k === 'n' || k === 'e' || k === 'l' || k === 'c') {
-    const what = { w: 'Workplane', r: 'Ruler', n: 'Notes', e: 'Shape workplane', l: 'Align', c: 'Cruise' }[k];
+  if (k === 'r' || k === 'n' || k === 'l' || k === 'c') {
+    const what = { r: 'Ruler', n: 'Notes', l: 'Align', c: 'Cruise' }[k];
     return act(() => status(`${what} is not built yet.`));
   }
 });
