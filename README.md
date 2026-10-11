@@ -57,3 +57,12 @@ projects).
 | Ctrl + Z / Ctrl + Y | undo / redo |
 | Ctrl + E | export |
 | Delete, Esc | delete, clear selection |
+
+## Licence
+
+Source-available: Apache License 2.0 with the Commons Clause. Use it for anything, commercial
+work included; the models you make are yours to sell; fork it with credit under the same
+terms; do not sell it or a fork of it. Full terms in [LICENSE](LICENSE).
+
+Bundled libraries keep their own licences (MIT, Apache-2.0, ISC, Boost 1.0), listed in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) and carried inside the built HTML file.

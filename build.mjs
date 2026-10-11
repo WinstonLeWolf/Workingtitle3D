@@ -51,9 +51,13 @@ async function build() {
   const m = await esbuild.build({ ...common, entryPoints: [path.join(src, 'core', 'main.js')], plugins: [virtuals(workerSource)] });
   const js = m.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
   const css = fs.readFileSync(path.join(src, 'core', 'theme.css'), 'utf8');
+  // the licences travel inside the one file: ours, and every bundled library's (their terms ask for it)
+  const legal = ['LICENSE', 'THIRD-PARTY-NOTICES.txt'].map(f => fs.readFileSync(path.join(root, f), 'utf8')).join('\n\n')
+    .replace(/<\/script/gi, '<\\/script');
   const html = fs.readFileSync(path.join(src, 'index.html'), 'utf8')
     .replace('/*CSS*/', () => css)
-    .replace('/*JS*/', () => js);
+    .replace('/*JS*/', () => js)
+    .replace('</body>', () => `<script type="text/plain" id="licences">\n${legal}</script>\n</body>`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html);
   console.log(`dist/Workingtitle3D.html  ${(html.length / 1024).toFixed(0)} KB  ${Date.now() - t0} ms  tools: ${toolIds().join(', ')}`);
