@@ -9,7 +9,7 @@
 // Results are cached by recipe key, so moving one part never rebuilds another.
 import Module from 'manifold-3d';
 import { Matrix4, Euler, Quaternion, Vector3 } from 'three';
-import { weld, ToolError } from './meshcheck.js';
+import { weld, report, ToolError } from './meshcheck.js';
 
 let M = null;
 export async function initKernel(wasmBinary) {
@@ -112,6 +112,7 @@ function primitive(kind, p) {
 // own check weld points closer than WELD, which would fold those slivers into bad edges,
 // so collapse them in the library first, where the result stays a valid solid.
 const TIDY = 2e-4;   // mm, above the 1e-4 weld
+const BRIDGE = 0.1;  // mm, half-width of the bridge laid along an edge where two pieces only touch
 function tidy(man) {
   return man.simplify(TIDY);
 }
@@ -233,7 +234,10 @@ export async function partMesh(part, ctx) {
 
 /** Everything solid and visible at the top level, joined into one closed solid in world space.
  *  Loose holes (not in a group) cut nothing, as on the plate. */
-export async function flatten(parts, ctx) {
+/** Every top-level visible solid joined into one. With opts.bridge, pieces that only touch
+ *  along an edge (a wall of zero thickness) get a thin bridge along that edge so the result is
+ *  one closed solid; opts.bridged says how many edges. The parts themselves are not changed. */
+export async function flatten(parts, ctx, opts = {}) {
   const placed = [], owned = [];
   for (const p of parts) {
     if (p.hole || p.hidden) continue;
@@ -245,7 +249,20 @@ export async function flatten(parts, ctx) {
   if (!placed.length) throw new ToolError('Nothing solid to save.');
   const joined = M.Manifold.union(placed);
   const all = tidy(joined);
-  const tris = toTris(all);
+  let tris = toTris(all);
+  if (opts.bridge) {
+    const rep = report(tris);
+    if (!rep.watertight && rep.overEdges.length && !rep.openEdges) {
+      const r = BRIDGE, around = (x, y, z) => [[x - r, y, z], [x + r, y, z], [x, y - r, z], [x, y + r, z], [x, y, z - r], [x, y, z + r]];
+      const bridges = rep.overEdges.map(e => M.Manifold.hull([...around(e[0], e[1], e[2]), ...around(e[3], e[4], e[5])]));
+      const fused = M.Manifold.union([all, ...bridges]);
+      const done = tidy(fused);
+      tris = toTris(done);
+      opts.bridged = rep.overEdges.length;
+      for (const m of [...bridges, fused]) m.delete();
+      if (done !== fused) done.delete();
+    }
+  }
   all.delete();
   if (joined !== all) joined.delete();
   for (const m of owned) m.delete();

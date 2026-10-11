@@ -929,12 +929,22 @@ async function exportModel(pick = false) {
     catch (err) { if (err.name === 'AbortError') { status('Export cancelled.'); return; } }
   }
   status('Joining parts...');
-  let bytes;
+  const made = !pick && home;   // a file this export created, so it may be removed on a failure
+  let bytes, bridged = 0;
   try {
     await sendBlobs();
-    const { tris } = await pool.call('kern', { type: 'flatten', parts: doc.parts });
+    let { tris, thin } = await pool.call('kern', { type: 'flatten', parts: doc.parts });
+    if (thin) {
+      // parts only touching along an edge: offer to join them for this file
+      const go = await ask(h('div', {}, h('p', {}, thin),
+        h('p', {}, 'Join them with a 0.2 mm wide bridge along where they touch? Only the exported file gets it; the model stays as it is.')),
+        [['Cancel', false], ['Join and export', true, true]]);
+      if (!go) { if (made) await handle.remove?.().catch(() => {}); status(`Not exported. ${thin}`, true); return; }
+      status('Joining parts with a bridge...');
+      ({ tris, bridged } = await pool.call('kern', { type: 'flatten', parts: doc.parts, bridge: true }));
+    }
     ({ bytes } = await pool.call('io', { type: 'save', tris, fmt }, [tris.buffer]));
-  } catch (err) { status(err.message, true); return; }
+  } catch (err) { if (made) await handle.remove?.().catch(() => {}); status(err.message, true); return; }
   if (handle) {
     try {
       const w = await handle.createWritable();
@@ -943,7 +953,7 @@ async function exportModel(pick = false) {
       const buf = await (await handle.getFile()).arrayBuffer();
       const r = await pool.call('io', { type: 'check', name: handle.name, buf }, [buf]);
       if (!r.report.watertight) { await handle.remove?.().catch(() => {}); status(`The exported file did not read back as a closed solid (${r.text}), so it was removed.`, true); return; }
-      status(`Exported ${home && !pick ? 'exports/' : ''}${handle.name}: one closed solid, ${count(r.report.triangles)} triangles, read back and checked.`);
+      status(`Exported ${home && !pick ? 'exports/' : ''}${handle.name}: one closed solid, ${count(r.report.triangles)} triangles, read back and checked${bridged ? `; bridged where parts touched (${bridged} edges)` : ''}.`);
     } catch (err) { status(`Could not write the file: ${err.message}`, true); }
     return;
   }

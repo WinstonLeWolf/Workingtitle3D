@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { initKernel, partMesh, flatten, SHAPES, shapeKey } from '../src/core/kernel.js';
-import { report, describe, bounds } from '../src/core/meshcheck.js';
+import { report, describe, bounds, thinWall } from '../src/core/meshcheck.js';
 import * as edgeshaper from '../src/tools/edgeshaper/compute.js';
 import * as hollower from '../src/tools/hollower/compute.js';
 
@@ -71,6 +71,19 @@ for (const kind of Object.keys(SHAPES)) {
   let worst = 0;
   for (let i = 2; i < tris.length; i += 3) if (tris[i] < 0.01) worst = Math.max(worst, Math.abs(tris[i]));
   ok('flatten to one solid', r.watertight && worst === 0, `${describe(r)} ${r.triangles} tris  worst floor z ${worst}`);
+}
+// two boxes touching along one edge: the export refuses it and says where, in plain words
+{
+  const tris = await flatten([part('box', { x: 10, y: 10, z: 10 }), part('box', { x: 10, y: 10, z: 10 }, { xform: { pos: [10, 10, 0], rot: [0, 0, 0], scale: [1, 1, 1] } })], ctx);
+  const msg = thinWall(report(tris)) || describe(report(tris));
+  ok('zero-thickness wall named and placed', /zero thickness, near X 5, Y 5, Z 5/.test(msg), msg.slice(0, 90));
+  const two = [part('box', { x: 10, y: 10, z: 10 }), part('box', { x: 10, y: 10, z: 10 }, { xform: { pos: [10, 10, 0], rot: [0, 0, 0], scale: [1, 1, 1] } })];
+  const o = { bridge: true }, r = report(await flatten(two, ctx, o));
+  ok('bridge joins edge-touching boxes', r.watertight && o.bridged > 0 && r.volume > 2000 && r.volume < 2000.5, `${describe(r)} vol ${r.volume.toFixed(3)}, ${o.bridged} edges`);
+  // a hole as wide as the box it cuts: the box walls go to nothing where the hole touches them
+  const g = part('group', {}, { children: [part('box', { x: 20, y: 20, z: 20 }), part('cylinder', { d: 20, h: 30 }, { hole: true, xform: { pos: [0, 0, -5], rot: [0, 0, 0], scale: [1, 1, 1] } })] });
+  const r0 = report(await flatten([g], ctx)), o2 = { bridge: true }, r2 = report(await flatten([g], ctx, o2));
+  ok('bridge joins a hole touching the walls', !r0.watertight && r2.watertight && o2.bridged > 0, `before ${describe(r0)}; after ${describe(r2)}, ${o2.bridged} edges`);
 }
 console.log(fail ? `${fail} FAILED` : 'all passed');
 process.exit(fail ? 1 : 0);

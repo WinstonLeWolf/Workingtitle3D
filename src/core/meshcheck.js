@@ -51,7 +51,7 @@ export function bounds(tris) {
 export function report(tris, tol = WELD) {
   const n = tris.length / 9;
   if (!n) return { triangles: 0, openEdges: 0, oversharedEdges: 0, flippedEdges: 0, volume: 0, watertight: false };
-  const { idx, nv } = weld(tris, tol);
+  const { pos, idx, nv } = weld(tris, tol);
   const und = new Map(), dir = new Map();
   for (let t = 0; t < n; t++) {
     const a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
@@ -64,11 +64,33 @@ export function report(tris, tol = WELD) {
     }
   }
   let open = 0, over = 0, flip = 0;
-  for (const c of und.values()) { if (c === 1) open++; else if (c > 2) over++; }
+  const overEdges = [];   // [x1, y1, z1, x2, y2, z2] of each over-shared edge: where pieces only touch
+  for (const [u, c] of und) {
+    if (c === 1) open++;
+    else if (c > 2) {
+      over++;
+      const p = Math.floor(u / nv), q = u % nv;
+      if (overEdges.length < 20000) overEdges.push([pos[p * 3], pos[p * 3 + 1], pos[p * 3 + 2], pos[q * 3], pos[q * 3 + 1], pos[q * 3 + 2]]);
+    }
+  }
   for (const c of dir.values()) if (c > 1) flip++;
   const vol = volume(tris);
   return { triangles: n, openEdges: open, oversharedEdges: over, flippedEdges: flip, volume: vol,
-    watertight: open === 0 && over === 0 && flip === 0 && vol > 0 };
+    watertight: open === 0 && over === 0 && flip === 0 && vol > 0, overEdges };
+}
+
+/** The middle of the over-shared edges, rounded for a message. */
+function overAt(rep) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const e of rep.overEdges) for (let i = 0; i < 6; i++) { lo[i % 3] = Math.min(lo[i % 3], e[i]); hi[i % 3] = Math.max(hi[i % 3], e[i]); }
+  return lo.map((v, i) => +((v + hi[i]) / 2).toFixed(1));
+}
+
+/** Over-shared edges and no open ones: two pieces meet along an edge or face with nothing between them. */
+export function thinWall(rep) {
+  if (rep.watertight || !rep.oversharedEdges || rep.openEdges) return null;   // such an edge also counts as flipped
+  const [x, y, z] = overAt(rep);
+  return `Two parts touch with nothing between them, a wall of zero thickness, near X ${x}, Y ${y}, Z ${z} mm.`;
 }
 
 /** The clean-up every mesh tool owes its user: weld, drop zero-area and duplicate

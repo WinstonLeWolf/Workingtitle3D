@@ -2,7 +2,7 @@
 // Tool computes are collected from src/tools/*/compute.js by the build.
 import tools from 'virtual:tools-compute';
 import { readMesh, writeMesh } from './meshio.js';
-import { repair, report, adjacency, describe, ToolError } from './meshcheck.js';
+import { repair, report, adjacency, describe, thinWall, ToolError } from './meshcheck.js';
 import { initKernel, partMesh, flatten } from './kernel.js';
 import wasmBinary from 'manifold-3d/manifold.wasm';
 
@@ -35,7 +35,7 @@ self.onmessage = async e => {
       done({ tris, report: rep, notes: out.notes || [] }, [tris.buffer]);
     } else if (m.type === 'save') {
       const rep = report(m.tris);
-      if (!rep.watertight) throw new ToolError(`The model is ${describe(rep)}, so it was not saved.`);
+      if (!rep.watertight) throw new ToolError(thinWall(rep) || `The model is ${describe(rep)}, so it was not saved.`);
       const bytes = writeMesh(m.tris, m.fmt);
       const back = report(await readMesh('check.' + m.fmt, bytes.slice().buffer));
       if (!back.watertight) throw new ToolError(`The ${m.fmt.toUpperCase()} data did not read back as a closed solid (${describe(back)}), so it was not saved.`);
@@ -53,8 +53,9 @@ self.onmessage = async e => {
     } else if (m.type === 'flatten') {
       await initKernel(wasmBinary);
       progress(0.3, 'joining parts');
-      const tris = await flatten(m.parts, { blobs, tools, progress });
-      done({ tris }, [tris.buffer]);
+      const opts = { bridge: !!m.bridge };
+      const tris = await flatten(m.parts, { blobs, tools, progress }, opts);
+      done({ tris, thin: m.bridge ? null : thinWall(report(tris)), bridged: opts.bridged || 0 }, [tris.buffer]);
     } else if (m.type === 'adj') {
       const adj = adjacency(m.tris);
       done({ adj }, [adj.buffer]);
