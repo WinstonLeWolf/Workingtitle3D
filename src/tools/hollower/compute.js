@@ -18,7 +18,6 @@ import { triangulate, nest } from '../../core/tri2d.js';
 import { problem } from './limits.js';
 
 const TOP = 3;                 // top cells are 2^3 = 8 voxels a side
-const MAX_CELLS = 4e7;         // voxel count limit (edge keys must stay below 2^53)
 const NUDGE = 0.01;            // |g| kept at least this many voxels from zero
 
 // tets of a cube, corners numbered x + 2y + 4z; all share the 0-7 diagonal, so
@@ -78,10 +77,7 @@ export async function run(tris, p, ctx) {
   const jit = [0.000731, 0.000419, 0.000277];   // keep grid columns off round coordinates
   const org = lo.map((v, a) => v - 2 * h + jit[a] * h);
   const nc = lo.map((v, a) => Math.ceil((hi[a] - v + 4 * h) / h / B) * B);
-  if (nc[0] * nc[1] * nc[2] > MAX_CELLS) {
-    throw new ToolError(`Too fine for a part this size (${(nc[0] * nc[1] * nc[2] / 1e6).toFixed(0)} M voxels). Choose a coarser resolution.`);
-  }
-  const NX = nc[0] + 1, NY = nc[1] + 1, NZ = nc[2] + 1, N = NX * NY * NZ;
+  const NX = nc[0] + 1, NY = nc[1] + 1;
   const L = (i, j, k) => i + NX * (j + NY * k);
   const RTOP = (B * h * Math.sqrt(3)) / 2;
   const cap = t + RTOP + h;
@@ -166,9 +162,14 @@ export async function run(tris, p, ctx) {
   const ce = new Map();          // grid edge -> cavity vertex
   const ct = [];                 // cavity triangles
   const P = (c) => [org[0] + (c % NX) * h, org[1] + (Math.floor(c / NX) % NY) * h, org[2] + Math.floor(c / (NX * NY)) * h];
+  // a grid edge is its lower corner and the step to the other (each axis -1, 0 or +1)
+  const edgeKey = (a, b) => {
+    const dx = (b % NX) - (a % NX), dy = (Math.floor(b / NX) % NY) - (Math.floor(a / NX) % NY), dz = Math.floor(b / (NX * NY)) - Math.floor(a / (NX * NY));
+    return a * 27 + (dx + 1) + 3 * (dy + 1) + 9 * (dz + 1);
+  };
   const edgeVertex = (a, b, ga, gb) => {
     if (a > b) { [a, b] = [b, a]; [ga, gb] = [gb, ga]; }
-    const key = a * N + b;
+    const key = edgeKey(a, b);
     let id = ce.get(key);
     if (id !== undefined) return id;
     const pa = P(a), pb = P(b), u = ga / (ga - gb);

@@ -1,5 +1,6 @@
 node_modules/
 dist/
+/Workingtitle3D.html
 .tmp/
 *.log
 NOTES.md
@@ -7,3 +8,6 @@ project.json
 journal.ndjson
 meshes/
 dev/
+projects/
+exports/
+box.png

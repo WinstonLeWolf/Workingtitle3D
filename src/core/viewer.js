@@ -6,10 +6,10 @@
 // left drag on empty space draws a selection box.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { faultEdges } from './meshcheck.js';
 
 const C = { bg: 0x0a0a0a, body: 0x9c9c9c, bodySel: 0xc8c8c8, inside: 0x2d5a2d, edge: 0x000000, edgeSel: 0x7dcf7d,
-  hole: 0x8a8a8a, grid: 0x222222, gridMajor: 0x3a3a3a, plate: 0x111411, pick: 0x7dcf7d, box: 0x7dcf7d };
-const EDGE_MAX_TRIS = 400000;
+  hole: 0x8a8a8a, grid: 0x333333, gridMajor: 0x555555, plate: 0x111411, pick: 0x7dcf7d, box: 0x7dcf7d };
 
 export class Viewer {
   constructor(el) {
@@ -35,6 +35,27 @@ export class Viewer {
     this.camera.position.set(160, -220, 170);
     this.controls = new OrbitControls(this.camera, dom);
     this.controls.enableDamping = true;
+    // the wheel is ours: towards the point under the pointer, 5% of the way per notch but never
+    // under 1 mm, so close up keeps a steady pace instead of crawling towards it for ever
+    this.controls.enableZoom = false;
+    dom.addEventListener('wheel', e => {
+      e.preventDefault();
+      const notches = Math.max(-5, Math.min(5, e.deltaY / 100));
+      if (!notches) return;
+      const ray = this.ray(e).ray, h = this.hit(e);
+      let p = h ? h.point.clone() : null;
+      if (!p) { p = new THREE.Vector3(); if (!ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p) || p.distanceTo(this.camera.position) > 1e5) p = ray.at(this.camera.position.distanceTo(this.controls.target), new THREE.Vector3()); }
+      const d = this.camera.position.distanceTo(p);
+      let step = Math.max(d * 0.05, 1) * Math.abs(notches);
+      if (notches < 0 && step > d - 0.5) step = Math.max(0, d - 0.5);   // stop half a millimetre short
+      // camera and orbit point both scale towards (or away from) the point: the view direction
+      // never changes, so nothing turns
+      const k = notches < 0 ? 1 - step / d : 1 + step / d;
+      this.camera.position.sub(p).multiplyScalar(k).add(p);
+      this.controls.target.sub(p).multiplyScalar(k).add(p);
+      this.controls.update();
+      this.request();
+    }, { passive: false });
     this.controls.dampingFactor = 0.18;
     this.controls.screenSpacePanning = true;
     this.controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
@@ -63,7 +84,7 @@ export class Viewer {
     this.scene.add(this.root);
     this.objs = new Map();     // part id -> {group, mesh, edges, key, tris, part}
     this.selected = new Set();
-    this.setPlate({ w: 200, d: 200, every: 10 });
+    this.setPlate({ w: 600, d: 600, every: 1 });
 
     // events the app listens to
     this.onPick = null;        // (id|null, faceIndex, event)
@@ -93,6 +114,8 @@ export class Viewer {
     dom.addEventListener('contextmenu', e => e.preventDefault());
     dom.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
+      if (this.ghost) { e.stopPropagation(); this.onPlace?.('click', this.placeHit(e)); return; }
+      if (this.pickingFace) { e.stopPropagation(); this.pickingFace = false; this.onPickFace?.(this.placeHit(e)); return; }
       if (e.ctrlKey) {   // Ctrl + left: orbit
         this.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
         return;
@@ -110,6 +133,7 @@ export class Viewer {
       dom.setPointerCapture(e.pointerId);
     });
     dom.addEventListener('pointermove', e => {
+      if (this.ghost) { this.onPlace?.('move', this.placeHit(e)); return; }
       if (!down) { this.hover(e); return; }
       if (down.handle) { this.onHandle?.('move', this.follow(down.handle, e), e); return; }
       const dist = Math.hypot(e.clientX - down.x, e.clientY - down.y);
@@ -211,6 +235,20 @@ export class Viewer {
       this.controls.update();
       if (this.clipOn) this.updateClip();
       this.updateHandles();
+      // from under the plate only the 10 mm lines show; the fine patch only when 1 mm spans 40 px or more
+      const below = this.camera.position.z < 0;
+      // 1 mm lines only when 1 mm spans about 2.7 px or more: further out they shimmer, and the 10 mm grid is enough
+      // and faded in from there to full at 8 px, so lines too close to land evenly on pixels never band
+      if (this.minorLines) {
+        const px = 1 / this.pxAt(this.controls.target);
+        this.minorLines.visible = !below && px >= 8 / 3;
+        this.minorLines.material.opacity = Math.min(1, Math.max(0.15, (px - 8 / 3) / (8 - 8 / 3)));
+      }
+      if (this.fine) this.fine.visible = !below && this.pxAt(this.controls.target) <= 1 / 40;
+      // panning moves at the orbit point's depth; close up that would crawl, so never slower than at 20 mm
+      this.controls.panSpeed = Math.max(1, 20 / Math.max(0.01, this.camera.position.distanceTo(this.controls.target)));
+      this.updateGuides();
+      this.updateInside();
       this.renderer.render(this.scene, this.camera);
     });
   }
@@ -230,7 +268,7 @@ export class Viewer {
         this.objs.set(p.id, o);
       }
       o.part = p;
-      if (o.body) o.body.color.set(p.color || C.body);   // colour never needs a rebuild
+      if (o.body) o.body.color.set(p.color || C.body);   // color never needs a rebuild
       this.place(o.group, p.xform);
       o.group.visible = !p.hidden;
     }
@@ -247,7 +285,7 @@ export class Viewer {
     g.computeBoundingSphere();
     const group = new THREE.Group();
     const hole = !!p.hole;
-    // each solid gets its own material so it can carry its own colour
+    // each solid gets its own material so it can carry its own color
     const body = hole ? null : new THREE.MeshLambertMaterial({ color: p.color || C.body, flatShading: true, polygonOffset: true,
       polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: this.clipOn ? [this.clipPlane] : null });
     const mesh = new THREE.Mesh(g, hole ? this.mats.hole : body);
@@ -255,13 +293,43 @@ export class Viewer {
     group.add(mesh);
     if (!hole) group.add(new THREE.Mesh(g, this.mats.inside));
     let edges = null;
-    if (m.tris.length / 9 <= EDGE_MAX_TRIS) {
+    {
       edges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 40), hole ? this.mats.holeEdge : this.mats.edge);
       if (hole) edges.computeLineDistances();
       group.add(edges);
     }
     this.root.add(group);
-    return { group, mesh, edges, body, key: m.key, tris: m.tris, hole, part: p };
+    const o = { group, mesh, edges, body, key: m.key, tris: m.tris, hole, part: p };
+    if (this.faultsOn) this.addFaults(o);
+    return o;
+  }
+
+  /** Fault highlight: where each part is not closed, as yellow lines with a dot at each end,
+   *  drawn through the model so a fault on the far side is still found. Off by default. */
+  setFaults(on) {
+    this.faultsOn = on;
+    for (const o of this.objs.values()) {
+      if (on && !o.faults) this.addFaults(o);
+      if (o.faults) o.faults.visible = on;
+    }
+    this.request();
+  }
+  addFaults(o) {
+    const f = faultEdges(o.tris);
+    o.faultCount = f;
+    if (!f.segs.length) { o.faults = new THREE.Group(); o.group.add(o.faults); return; }
+    if (!this.mats.fault) {
+      this.mats.fault = new THREE.LineBasicMaterial({ color: 0xffe066, depthTest: false, transparent: true });
+      this.mats.faultDot = new THREE.PointsMaterial({ color: 0xffe066, size: 6, sizeAttenuation: false, depthTest: false, transparent: true });
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(f.segs, 3));
+    const grp = new THREE.Group();
+    const lines = new THREE.LineSegments(g, this.mats.fault), dots = new THREE.Points(g, this.mats.faultDot);
+    lines.renderOrder = dots.renderOrder = 10;
+    grp.add(lines, dots);
+    o.faults = grp;
+    o.group.add(grp);
   }
 
   drop(o) {
@@ -302,6 +370,50 @@ export class Viewer {
   /** Move a part's display without a rebuild (live drag). */
   setXform(id, x) { const o = this.objs.get(id); if (o) { this.place(o.group, x); this.request(); } }
 
+  /** Placing a new shape: a see-through copy follows the pointer until a click.
+   *  onPlace('move' | 'click', hit) with hit = {point, normal} on a part, or {point} on the plate. */
+  startPlace(tris) {
+    this.endPlace();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(tris, 3));
+    g.computeVertexNormals();
+    this.ghost = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: C.body, transparent: true, opacity: 0.55, flatShading: true, depthWrite: false }));
+    this.ghost.visible = false;
+    this.scene.add(this.ghost);
+    this.request();
+  }
+  setGhost(x) { if (!this.ghost) return; this.place(this.ghost, x); this.ghost.visible = true; this.request(); }
+  endPlace() {
+    if (!this.ghost) return;
+    this.scene.remove(this.ghost); this.ghost.geometry.dispose(); this.ghost.material.dispose(); this.ghost = null;
+    this.request();
+  }
+  placeHit(e) {
+    const h = this.hit(e);
+    if (h) {
+      const o = this.objs.get(h.id), pos = o.mesh.geometry.attributes.position, f = h.face;
+      const a = new THREE.Vector3().fromBufferAttribute(pos, f * 3), b = new THREE.Vector3().fromBufferAttribute(pos, f * 3 + 1), c = new THREE.Vector3().fromBufferAttribute(pos, f * 3 + 2);
+      o.mesh.updateMatrixWorld();
+      [a, b, c].forEach(v => v.applyMatrix4(o.mesh.matrixWorld));
+      const n = b.clone().sub(a).cross(c.clone().sub(a)).normalize();
+      return { point: h.point, normal: n, id: h.id };
+    }
+    const ray = this.ray(e), p = new THREE.Vector3();
+    return ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p) ? { point: p } : null;
+  }
+  /** Unit vectors in a plane that run most nearly right and up on screen. */
+  planeAxes(n) {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+    const flat = v => v.clone().sub(n.clone().multiplyScalar(v.dot(n))).normalize();
+    let u = flat(right);
+    if (!(u.lengthSq() > 0.5)) u = flat(up).cross(n).normalize();
+    let w = n.clone().cross(u).normalize();
+    if (w.dot(up) < 0) w.negate();
+    return { u, v: w };
+  }
+
   /** Preview a different mesh for one part (tool steps), or null to go back. */
   preview(id, tris) {
     const o = this.objs.get(id);
@@ -326,7 +438,7 @@ export class Viewer {
   paintSelection() {
     for (const [id, o] of this.objs) {
       const on = this.selected.has(id);
-      // selected: lit up (lightness, works on any colour) and green outline (shape cue)
+      // selected: lit up (lightness, works on any color) and green outline (shape cue)
       if (o.body) o.body.emissive.setHex(on ? 0x3a3a3a : 0x000000);
       if (o.edges && !o.hole) o.edges.material = on ? this.mats.edgeSel : this.mats.edge;
     }
@@ -424,6 +536,65 @@ export class Viewer {
 
   /** Show handles on this part (or none). */
   setHandles(id) { this.handleFor = id; this.request(); }
+  setRings(on) { this.ringsOn = on; this.request(); }
+  setGrid(on) { this.gridOn = on; if (this.plate) this.plate.visible = on; this.request(); }
+  /** Selection guides: the selected parts' outline on the plate, and its four sides run out
+   *  to the plate's edges, so lining parts up can be judged from afar. */
+  updateGuides() {
+    const ids = [...(this.selected || [])].filter(id => this.objs.get(id)?.group.visible);
+    if (!this.guides) {
+      this.mats.guide = new THREE.LineBasicMaterial({ color: this.guideColor || 0x3d7a3d });
+      this.guides = new THREE.LineSegments(new THREE.BufferGeometry(), this.mats.guide);
+      this.guides.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(48), 3));
+      this.guides.position.z = 0.02;
+      this.scene.add(this.guides);
+    }
+    if (!ids.length || this.ghost) { this.guides.visible = false; return; }
+    const b = new THREE.Box3();
+    for (const id of ids) b.union(new THREE.Box3().setFromObject(this.objs.get(id).group));
+    const [hw, hd] = this.plateHalf || [300, 300], x0 = b.min.x, x1 = b.max.x, y0 = b.min.y, y1 = b.max.y;
+    const a = this.guides.geometry.attributes.position.array;
+    a.set([x0, y0, 0, x1, y0, 0, x1, y0, 0, x1, y1, 0, x1, y1, 0, x0, y1, 0, x0, y1, 0, x0, y0, 0,
+      x0, -hd, 0, x0, hd, 0, x1, -hd, 0, x1, hd, 0, -hw, y0, 0, hw, y0, 0, -hw, y1, 0, hw, y1, 0]);
+    this.guides.geometry.attributes.position.needsUpdate = true;
+    this.guides.geometry.computeBoundingSphere();
+    this.guides.visible = true;
+  }
+  /** Inside a part, that part turns see-through until the camera leaves it; the rest stay solid. */
+  updateInside() {
+    const cam = this.camera.position;
+    let inside = null;
+    for (const [id, o] of this.objs) {
+      if (o.hole || !o.group.visible || !o.body) continue;
+      if (!new THREE.Box3().setFromObject(o.group).containsPoint(cam)) continue;
+      const rc = new THREE.Raycaster(cam.clone(), new THREE.Vector3(0.577, 0.577, 0.577));
+      const exits = rc.intersectObject(o.group.children[1], false).length, entries = rc.intersectObject(o.mesh, false).length;
+      if (exits > entries) { inside = id; break; }
+    }
+    if (inside === this.insideId && (!inside || this.objs.get(inside)?.body?.transparent)) return;   // a rebuilt part comes back solid
+    const set = (id, on) => {
+      const o = this.objs.get(id);
+      if (!o?.body) return;
+      o.body.transparent = on; o.body.opacity = on ? 0.25 : 1; o.body.depthWrite = !on; o.body.needsUpdate = true;
+      if (o.group.children[1]) o.group.children[1].visible = !on;
+    };
+    if (this.insideId) set(this.insideId, false);
+    if (inside) set(inside, true);
+    this.insideId = inside;
+  }
+
+  /** Accent colors for a scheme: selection edges, picks and the inside of a cut. */
+  setScheme(id) {
+    const s = { green: [0x7dcf7d, 0x2d5a2d, 0x3d7a3d], blue: [0x8cc4ff, 0x1f3d66, 0x2f5f99], mono: [0xffffff, 0x3a3a3a, 0x6a6a6a] }[id] || [0x7dcf7d, 0x2d5a2d, 0x3d7a3d];
+    this.guideColor = s[2];
+    for (const [k, m] of Object.entries(this.mats)) {
+      if (!m?.color) continue;
+      if (k === 'guide') m.color.setHex(s[2]);
+      else if (k === 'inside') m.color.setHex(s[1]);
+      else if (/sel|pick|box|handle/i.test(k)) m.color.setHex(s[0]);
+    }
+    this.request();
+  }
 
   /** World millimetres per screen pixel at a point. */
   pxAt(p) {
@@ -457,7 +628,8 @@ export class Viewer {
     const look = this.camera.position.clone().sub(mid).normalize();
     for (const ring of this.handles.children.filter(c => c.userData.axis !== undefined)) {
       const a = ring.userData.axis;
-      ring.visible = Math.abs(look.getComponent(a)) > 0.25;   // a ring seen edge-on is a line: no use, hide it
+      // shown only when asked for (the Rotate box, or R held); a ring seen edge-on is a line, so hidden
+      ring.visible = !!this.ringsOn && Math.abs(look.getComponent(a)) > 0.25;
       const r = (a === 0 ? Math.hypot(half.y, half.z) : a === 1 ? Math.hypot(half.x, half.z) : Math.hypot(half.x, half.y)) + rpx * 22;
       ring.position.copy(mid);
       ring.scale.setScalar(r);
@@ -537,11 +709,12 @@ export class Viewer {
       this.scene.remove(this.plate);
       this.plate.traverse(o => { o.geometry?.dispose(); o.material?.dispose(); });
     }
-    const hw = w / 2, hd = d / 2, p = [], c = [];
+    const hw = w / 2, hd = d / 2, p = [], c = [], pM = [], cM = [];
+    this.plateHalf = [hw, hd];
     const minor = new THREE.Color(C.grid), major = new THREE.Color(C.gridMajor);
-    const big = every * (every >= 10 ? 5 : 10);
+    const big = every < 10 ? 10 : every * 5;   // heavy lines every 10 mm whenever the spacing allows
     const onBig = v => Math.abs(v / big - Math.round(v / big)) < 1e-6;
-    const line = (k, ...xyz) => { p.push(...xyz); c.push(k.r, k.g, k.b, k.r, k.g, k.b); };
+    const line = (k, ...xyz) => { const [pp, cc] = k === major ? [pM, cM] : [p, c]; pp.push(...xyz); cc.push(k.r, k.g, k.b, k.r, k.g, k.b); };
     for (let i = -Math.floor(hw / every + 1e-9); i * every <= hw + 1e-9; i++) { const v = i * every; line(onBig(v) ? major : minor, v, -hd, 0, v, hd, 0); }
     for (let i = -Math.floor(hd / every + 1e-9); i * every <= hd + 1e-9; i++) { const v = i * every; line(onBig(v) ? major : minor, -hw, v, 0, hw, v, 0); }
     line(major, -hw, -hd, 0, hw, -hd, 0); line(major, -hw, hd, 0, hw, hd, 0);
@@ -549,11 +722,27 @@ export class Viewer {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
     g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3));
-    const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true }));
+    const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }));
+    const gM = new THREE.BufferGeometry();
+    gM.setAttribute('position', new THREE.Float32BufferAttribute(pM, 3));
+    gM.setAttribute('color', new THREE.Float32BufferAttribute(cM, 3));
+    const majorLines = new THREE.LineSegments(gM, new THREE.LineBasicMaterial({ vertexColors: true }));
+    this.minorLines = lines;
     const plate = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshBasicMaterial({ color: C.plate, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 }));
     plate.position.z = -0.01;
+    // fine lines: 0.1 mm over a 200 x 200 mm patch in the middle, whatever the plate size, shown
+    // only when zoomed in close (fixed size, so a wide screen costs no more)
+    const fw = Math.min(100, hw), fd = Math.min(100, hd), fp = [];
+    for (let i = Math.round(-fw * 10); i <= fw * 10; i++) if (i % 10) fp.push(i / 10, -fd, 0, i / 10, fd, 0);
+    for (let i = Math.round(-fd * 10); i <= fd * 10; i++) if (i % 10) fp.push(-fw, i / 10, 0, fw, i / 10, 0);
+    fp.push(-fw, -fd, 0, fw, -fd, 0, -fw, fd, 0, fw, fd, 0, -fw, -fd, 0, -fw, fd, 0, fw, -fd, 0, fw, fd, 0);
+    const fg = new THREE.BufferGeometry();
+    fg.setAttribute('position', new THREE.Float32BufferAttribute(fp, 3));
+    this.fine = new THREE.LineSegments(fg, new THREE.LineBasicMaterial({ color: 0x2a2a2a }));
+    this.fine.position.z = 0.001;
     this.plate = new THREE.Group();
-    this.plate.add(plate, lines);
+    this.plate.add(plate, this.fine, lines, majorLines);
+    this.plate.visible = this.gridOn !== false;
     this.scene.add(this.plate);
     this.request();
   }
@@ -580,7 +769,7 @@ export class Viewer {
     const c = b.getCenter(new THREE.Vector3());
     const r = Math.max(5, b.getSize(new THREE.Vector3()).length() / 2);
     const d = (r / Math.sin((this.camera.fov * Math.PI) / 360)) * 1.1;
-    const dir = { iso: [0.55, -0.75, 0.55], top: [0, -0.0001, 1], front: [0, -1, 0.0001], right: [1, 0, 0.0001] }[kind] || null;
+    const dir = { iso: [0.55, -0.75, 0.55], top: [0, -0.0001, 1], front: [0, -1, 0.0001], left: [-1, 0, 0.0001], right: [1, 0, 0.0001] }[kind] || null;
     const v = dir ? new THREE.Vector3(...dir).normalize() : this.camera.position.clone().sub(this.controls.target).normalize();
     this.controls.target.copy(c);
     this.camera.position.copy(c).addScaledVector(v, d);

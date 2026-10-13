@@ -1,6 +1,15 @@
 // hollower panel: hollow a closed model to a set wall, optionally open through one face.
 import { problem } from './limits.js';
 
+// presets plus a box for any value; each follows the other
+export function gridPicker(ui, value, set) {
+  const presets = ['1', '0.5', '0.25', '0.1'];
+  let seg, box;
+  seg = ui.seg(presets.map(v => [v, v + ' mm']), presets.includes(String(value)) ? String(value) : '', v => { box.set(+v); set(+v); });
+  box = ui.numfield('Resolution', value, 'mm', v => { seg.set?.(presets.includes(String(v)) ? String(v) : ''); set(v); }, { min: 0.001, step: 0.05, digits: 3, lazy: true });
+  return [box, seg];
+}
+
 export default {
   id: 'hollower',
   title: 'Hollow',
@@ -28,10 +37,8 @@ export default {
           : 'Click a flat face on the outside of the model.';
     };
     el.append(
-      ui.numfield('Wall thickness', p.wall, 'mm', v => api.set('wall', v), { min: 0.1, max: 100, step: 0.2 }),
-      ui.h('div', { class: 'sub' }, 'Resolution'),
-      ui.seg([['1', '1 mm'], ['0.5', '0.5 mm'], ['0.25', '0.25 mm']], String(p.voxel), v => api.set('voxel', +v)),
-      ui.h('div', { class: 'note' }, 'Finer is slower. Inside corners are cut off by up to half of it.'),
+      ui.numfield('Wall thickness', p.wall, 'mm', v => api.set('wall', v), { min: 0.001, step: 0.2, digits: 3 }),
+      ...gridPicker(ui, p.voxel, v => api.set('voxel', v)),
       ui.check('Open through a face', p.open, v => { p.open = v; update(); api.set('open', v); }),
       faceLine,
     );

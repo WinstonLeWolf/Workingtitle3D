@@ -50,7 +50,7 @@ try {
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') errors.push(`console.${m.type()}: ${m.text()}`); });
   await page.setViewport({ width: 1366, height: 768 });
-  await page.goto(pathToFileURL(join(ROOT, 'dist', 'Workingtitle3D.html')).href);
+  await page.goto(pathToFileURL(join(ROOT, 'Workingtitle3D.html')).href);
   const cdp = await page.createCDPSession();
   await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: join(OUT, 'dl') });
   await page.evaluate(() => { window.showSaveFilePicker = undefined; });
@@ -66,6 +66,13 @@ try {
     throw new Error(`no ${sel} "${text}"`);
   };
   const shot = async name => { await sleep(400); await page.screenshot({ path: join(OUT, name + '.png') }); };
+  // a menu item: open the menu by its title, click the item by its label
+  const menuItem = async (m, item) => {
+    for (const t of await page.$$('.menubar .mtitle')) if ((await t.evaluate(n => n.textContent)) === m) { await t.click(); break; }
+    await sleep(100);
+    for (const b of await page.$$('.menu.open .mitem')) if ((await b.$eval('.mlabel', n => n.textContent)) === item) { await b.click(); await sleep(150); return; }
+    throw new Error(`no menu item ${m} > ${item}`);
+  };
   const step = (name, ok, info = '') => { if (!ok) fail++; console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${info ? '  ' + info : ''}`); };
   const parts = () => page.$$eval('.prow', r => r.map(x => x.textContent));
   const field = async (label, value) => {
@@ -79,7 +86,7 @@ try {
     throw new Error('no field ' + label);
   };
   // shapes live on the Shape tools tab; come back to Parts, where the options are
-  const addShape = async name => { await click('.tabs button', 'Shape tools'); await click('.shapes .btn', name); await click('.tabs button', 'Parts'); };
+  const addShape = async name => { await click('.tabs button', 'Shape tools'); await click('.shapes .btn', name); await sleep(300); await page.keyboard.press('Enter'); await click('.tabs button', 'Parts'); };
   const keys = async (...k) => { for (const x of k) await page.keyboard.down(x); for (const x of k.reverse()) await page.keyboard.up(x); await sleep(150); };
 
   await shot('0-empty');
@@ -92,7 +99,7 @@ try {
   step('two shapes', (await parts()).length === 2, (await parts()).join(' | '));
 
   // cylinder: a hole through the box centre, taller than the box
-  await field('Centre X', 0); await field('Centre Y', 0);
+  await field('Center X', 0); await field('Center Y', 0);
   await field('Diameter', 16); await field('Height', 30); await field('Bottom Z', -5);
   await keys('h');
   step('hole', (await parts()).some(t => t.includes('Cylinder 1') && t.includes('hole')));
@@ -106,6 +113,7 @@ try {
   const hole64 = 0.5 * 64 * 64 * Math.sin((2 * Math.PI) / 64) * 20;   // 64-sided cylinder, d 16, through 20 mm
   step("group volume = box minus hole", Math.abs(v1 - (8000 - hole64) / 1000) < 0.01, `${v1} cm3 vs ${((8000 - hole64) / 1000).toFixed(2)}`);
   await shot('2-group');
+  step('group shows Ungroup', await page.$$eval('.inspector button', bs => bs.some(b => b.textContent === 'Ungroup')));
 
   // fillet step on the group
   await click('.inspector .btn', 'Edge shaper');
@@ -145,26 +153,49 @@ try {
   await (await page.$('input[type=file]')).uploadFile(part);
   await waitStatus(/Imported|ERROR/);
   step('import', (await parts()).length === 2, await statusText());
-  await click('.btn', 'Top');
+  // a mesh that will not close still loads, with a note, and Ctrl+Z takes it away again
+  const fins = join(OUT, 'fins.stl');
+  writeFileSync(fins, writeSTL(Float32Array.from([0,0,0, 10,0,0, 5,8,0])));
+  await (await page.$('input[type=file]')).uploadFile(fins);
+  await waitStatus(/Imported fins|ERROR/);
+  const finMsg = await statusText();
+  step('open mesh loads with a note', (await parts()).length === 3 && /Imported fins.*Not fully closed/.test(finMsg) && !/^ERROR/.test(finMsg), finMsg);
+  await keys('Control', 'z');
+  await sleep(800);
+  await page.click('.viewbtn[aria-label="Top"]');
   await sleep(500);
-  const box = await (await page.$('#view canvas')).boundingBox();
-  const before = await page.evaluate(() => document.querySelector('.inspector .field input')?.value);
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // drag the selected part by its middle, with a tool panel open: it must move
+  for (const r of await page.$$('.prow')) if ((await r.evaluate(n => n.textContent)).includes('plate')) { await r.click(); break; }
+  await sleep(300);
+  const dragId = await page.evaluate(() => document.getElementById('view').viewer.handleFor);
+  await click('.inspector .btn', 'Simplify');
+  const at = await page.evaluate(id => {
+    const v = document.getElementById('view').viewer, o = v.objs.get(id), b = o.mesh.geometry.boundingBox;
+    o.group.updateMatrixWorld();
+    const c = b.getCenter(o.mesh.position.clone()).applyMatrix4(o.group.matrixWorld).project(v.camera);
+    const r = v.renderer.domElement.getBoundingClientRect();
+    return [r.left + (c.x + 1) / 2 * r.width, r.top + (1 - c.y) / 2 * r.height];
+  }, dragId);
+  const dragX = () => page.evaluate(id => document.getElementById('view').viewer.objs.get(id).group.position.x, dragId);
+  const x0 = await dragX();
+  await page.mouse.move(...at);
   await page.mouse.down();
-  for (let i = 1; i <= 10; i++) { await page.mouse.move(box.x + box.width / 2 + i * 8, box.y + box.height / 2); await sleep(20); }
+  for (let i = 1; i <= 10; i++) { await page.mouse.move(at[0] + i * 8, at[1]); await sleep(20); }
   await page.mouse.up();
   await sleep(500);
-  step('drag moves a part', /Move|Nudge/.test(await page.evaluate(() => document.querySelector('footer .msg').textContent)) || true, await statusText());
+  const x1 = await dragX();
+  await keys('Escape');
+  step('drag moves a part, tool panel open', x1 !== x0, `x ${x0} -> ${x1}; ${await statusText()}`);
   await shot('4-scene-1366');
   await page.setViewport({ width: 1920, height: 1080 });
   await shot('4-scene-1920');
   await page.setViewport({ width: 1366, height: 768 });
 
-  // colour
-  await click('.inspector .btn', 'Colour');
+  // color
+  await click('.inspector .btn', 'Color');
   await page.click('.palette .sw[title="Red"]');
   await sleep(300);
-  step('colour picked, named in text', (await page.$eval('.inspector .cname', e => e.textContent)) === 'Red');
+  step('color picked, named in text', (await page.$eval('.inspector .cname', e => e.textContent)) === 'Red');
 
   // options sit under the selected row; double-click the row renames in place; the arrow folds
   const under = await page.$eval('.prow.on', r => r.nextElementSibling?.classList.contains('inspector'));
@@ -184,19 +215,19 @@ try {
   await shot('4b-parts-panel');
 
   // arrows follow the view: top view right = +X; right view right = +Y
-  const posOf = () => page.$$eval('.inspector .field', fs => fs.filter(f => ['Centre X', 'Centre Y'].includes(f.querySelector('label').textContent)).slice(0, 2).map(f => +f.querySelector('input').value));
-  await click('.btn', 'Top'); await sleep(300);
+  const posOf = () => page.$$eval('.inspector .field', fs => fs.filter(f => ['Center X', 'Center Y'].includes(f.querySelector('label').textContent)).slice(0, 2).map(f => +f.querySelector('input').value));
+  await page.click('.viewbtn[aria-label="Top"]'); await sleep(300);
   const a0 = await posOf();
   await page.click('#view canvas', { offset: { x: 5, y: 5 } }).catch(() => {});
   await click('.prow', 'plateRedsolid').catch(async () => { const r = await page.$$('.prow'); await r[r.length - 1].click(); });
   await keys('ArrowRight');
   const a1 = await posOf();
-  await click('.btn', 'Right'); await sleep(300);
+  await page.click('.viewbtn[aria-label="Right"]'); await sleep(300);
   await keys('ArrowRight');
   const a2 = await posOf();
   step('arrows follow the view', a1[0] - a0[0] === 1 && a1[1] === a0[1] && a2[1] - a1[1] === 1 && a2[0] === a1[0], `${a0} -> ${a1} -> ${a2}`);
   // from below: front view, then right-drag the camera under the plate
-  await click('.btn', 'Front'); await sleep(300);
+  await page.click('.viewbtn[aria-label="Front"]'); await sleep(300);
   const vb = await (await page.$('#view canvas')).boundingBox();
   await page.mouse.move(vb.x + vb.width / 2, vb.y + vb.height / 2);
   await page.mouse.down({ button: 'right' });
@@ -223,23 +254,32 @@ try {
   step('move step', Math.abs(m1[0] - m0[0] - 0.5) < 1e-6 && Math.abs(m2[0] - m1[0] - 5) < 1e-6, `${m0} -> ${m1} -> ${m2}`);
 
   // grid size from the header
-  await click('header .btn', 'Grid');
+  await menuItem('View', 'Grid...');
   const wIn = await page.evaluateHandle(() => [...document.querySelectorAll('.pop .field')].find(f => f.querySelector('label').textContent === 'Width').querySelector('input'));
   await wIn.click(); await wIn.type('300'); await wIn.press('Enter');
   const gs = await waitStatus(/Grid \d/, 5000).catch(() => '');
   await shot('5b-grid');
   await click('.pop .btn', 'Done');
-  step('grid size', /Grid 300 x 200 mm/.test(gs), gs);
+  step('grid size', /Grid 300 x 600 mm/.test(gs), gs);
 
   // a small box that only clips the edge of a part selects it
-  await click('.btn', 'Top'); await sleep(300);
+  await page.click('.viewbtn[aria-label="Top"]'); await sleep(300);
   await keys('Escape');
   const cv = await (await page.$('#view canvas')).boundingBox();
   const edge = await page.evaluate(() => null);
   void edge;
-  await page.mouse.move(cv.x + 20, cv.y + cv.height / 2 - 5);
+  // a small box from empty plate onto the edge of a part
+  const pc = await page.evaluate(() => {
+    const v = document.getElementById('view').viewer, o = [...v.objs.values()][0], b = o.mesh.geometry.boundingBox;
+    o.group.updateMatrixWorld();
+    const c = b.getCenter(o.mesh.position.clone()).applyMatrix4(o.group.matrixWorld).project(v.camera);
+    const r = v.renderer.domElement.getBoundingClientRect();
+    return [r.left + (c.x + 1) / 2 * r.width, r.top + (1 - c.y) / 2 * r.height];
+  });
+  await page.keyboard.press('Escape');
+  await page.mouse.move(pc[0] - 120, pc[1] - 5);
   await page.mouse.down();
-  await page.mouse.move(cv.x + cv.width / 2 - 60, cv.y + cv.height / 2 + 5, { steps: 8 });
+  await page.mouse.move(pc[0] + 2, pc[1] + 5, { steps: 8 });
   await page.mouse.up();
   await sleep(300);
   const selCount = await page.$$eval('.prow.on', r => r.length);
@@ -257,7 +297,7 @@ try {
   await addShape('Box');
   await sleep(600);
   const fv = async l => page.$$eval('.inspector .field', (fs, l) => +fs.find(f => f.querySelector('label').textContent === l)?.querySelector('input').value, l);
-  const cx0 = await fv('Centre X'), z0 = await fv('Bottom Z');
+  const cx0 = await fv('Center X'), z0 = await fv('Bottom Z');
   const rotX = await page.$$('.inspector .field');
   for (const f of rotX) {
     const lab = await f.$eval('label', l => l.textContent);
@@ -265,7 +305,7 @@ try {
     if (lab === 'X' && sub.startsWith('Rotation')) { const i = await f.$('input'); await i.click(); await i.type('45'); await i.press('Enter'); break; }
   }
   await sleep(500);
-  const cx1 = await fv('Centre X'), z1 = await fv('Bottom Z');
+  const cx1 = await fv('Center X'), z1 = await fv('Bottom Z');
   step('rotate about the middle', Math.abs(cx1 - cx0) < 1e-3 && Math.abs(z1 - (10 - 10 * Math.SQRT2)) < 0.01 && z0 === 0, `centre X ${cx0} -> ${cx1}, bottom Z ${z0} -> ${z1}`);
   await keys('d');
   await sleep(400);
@@ -274,7 +314,7 @@ try {
   // handles on a fresh 20 mm box, from the top: drag the +X cube, the lift cone, the Z ring
   await addShape('Box');
   await sleep(600);
-  await click('.btn', 'Top'); await sleep(400);
+  await page.click('.viewbtn[aria-label="Top"]'); await sleep(400);
   const scr = (what) => page.evaluate(w => {
     const v = document.getElementById('view').viewer;
     v.updateHandles();
@@ -286,19 +326,24 @@ try {
     return [to(m.clone().setX(m.x + R)), to(m.clone().setY(m.y + R)), to(m.clone().setX(m.x + R * 0.7071).setY(m.y + R * 0.7071))];
   }, what);
   const dragPath = async pts => { await page.mouse.move(...pts[0]); await page.mouse.down(); for (const p of pts.slice(1)) { await page.mouse.move(...p, { steps: 6 }); await sleep(30); } await page.mouse.up(); await sleep(700); };
-  const w0 = await fv('Width'), cx0b = await fv('Centre X');
+  const w0 = await fv('Width'), cx0b = await fv('Center X');
   const hx = await scr('x');
   await dragPath([hx, [hx[0] + 20, hx[1]], [hx[0] + 60, hx[1]]]);
-  const w1 = await fv('Width'), cx1b = await fv('Centre X');
+  const w1 = await fv('Width'), cx1b = await fv('Center X');
   step('size handle: wider, far side stays', w1 > w0 && Number.isInteger(w1) && Math.abs((cx1b - w1 / 2) - (cx0b - w0 / 2)) < 1e-3, `width ${w0} -> ${w1}, left side ${cx0b - w0 / 2} -> ${cx1b - w1 / 2}`);
-  await click('.btn', 'Front'); await sleep(400);
+  await page.click('.viewbtn[aria-label="Front"]'); await sleep(400);
   const hl = await scr('lift');
   await dragPath([hl, [hl[0], hl[1] - 20], [hl[0], hl[1] - 50]]);
   const zl = await fv('Bottom Z');
   step('lift cone raises the part', zl > 0 && Number.isInteger(zl), `bottom Z ${zl}`);
-  await click('.btn', 'Top'); await sleep(400);
+  await page.click('.viewbtn[aria-label="Top"]'); await sleep(400);
+  const ringsOff = await page.evaluate(() => !document.getElementById('view').viewer.ringsOn);
+  await page.keyboard.down('r'); await sleep(200);   // hold R: the rings show
   const [r0, r90, r45] = await scr('ring');
   await dragPath([r0, r45, r90]);
+  await page.keyboard.up('r'); await sleep(200);
+  const ringsGone = await page.evaluate(() => !document.getElementById('view').viewer.ringsOn);
+  step('rings hidden until R is held, gone after', ringsOff && ringsGone);
   const rz = await fv('Z');
   step('Z ring turns in 15 degree steps', Math.abs(Math.abs(rz) - 90) < 1e-3, `rotation Z ${rz}`);
   await shot('5c-handles');
@@ -309,7 +354,7 @@ try {
   const bid = await page.evaluate(() => document.getElementById('view').viewer.handleFor);
   await click('.inspector .btn', 'Edge shaper');
   await click('aside .seg button', 'Picked');
-  await click('.btn', 'Front'); await sleep(400);
+  await page.click('.viewbtn[aria-label="Front"]'); await sleep(400);
   const fp = await page.evaluate(id => {
     const v = document.getElementById('view').viewer, o = v.objs.get(id), b = o.mesh.geometry.boundingBox;
     o.group.updateMatrixWorld();
@@ -332,7 +377,7 @@ try {
   await page.evaluateOnNewDocument(() => {
     window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('home', { create: true });
   });
-  const html = readFileSync(join(ROOT, 'dist', 'Workingtitle3D.html'));
+  const html = readFileSync(join(ROOT, 'Workingtitle3D.html'));
   server = createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end(html); });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
@@ -349,7 +394,7 @@ try {
   await page.reload();
   const reopened = await waitStatus(/Opened|ERROR/, 15000).catch(e => e.message);
   step('project reopens itself after a reload', /Opened Test case: 2 parts/.test(reopened), reopened);
-  await click('header .btn', 'Open');
+  await menuItem('File', 'Open...');
   await page.waitForSelector('dialog[open] .projlist');
   const listed = await page.$$eval('dialog[open] .projlist .btn', b => b.map(x => x.textContent));
   step('Open lists the projects', listed.includes('Test case'), listed.join(', '));
@@ -410,7 +455,7 @@ try {
   const nogl = await browser.newPage();
   await nogl.evaluateOnNewDocument(() => { const g = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (t, ...a) { return /webgl/.test(t) ? null : g.call(this, t, ...a); }; });
-  await nogl.goto(pathToFileURL(join(ROOT, 'dist', 'Workingtitle3D.html')).href);
+  await nogl.goto(pathToFileURL(join(ROOT, 'Workingtitle3D.html')).href);
   await sleep(1000);
   const fat = await nogl.$eval('.fatal', e => e.style.display !== 'none' && e.textContent).catch(() => '');
   await nogl.close();

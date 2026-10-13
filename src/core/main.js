@@ -2,11 +2,12 @@
 // Parts are recipes in the Doc; meshes come from the worker; tools are steps in a recipe.
 import workerSrc from 'virtual:worker-src';
 import tools from 'virtual:tools-ui';
+import { stlBytes, sizeText } from './decimate.js';
 import { Viewer } from './viewer.js';
 import * as ui from './ui.js';
-import { Vector3, Box3, Quaternion, Euler } from 'three';
+import { Vector3, Box3, Quaternion, Euler, Matrix4 } from 'three';
 import { Doc, shapeKey, IDENT, matrix } from './doc.js';
-import { Project } from './project.js';
+import { Project, packProject, unpackProject, PROJECT_EXT } from './project.js';
 import * as folders from './folders.js';
 import { describe, weld } from './meshcheck.js';
 
@@ -23,26 +24,26 @@ const SHAPES = {
 };
 const LABELS = { x: 'Width', y: 'Depth', z: 'Height', h: 'Height', d: 'Diameter', d1: 'Bottom diameter', d2: 'Top diameter',
   tube: 'Tube', wall: 'Wall', sides: 'Facets', tubeSides: 'Tube facets', r: 'Radius', length: 'Length' };
-const MOVE_STEPS = [0.1, 0.2, 0.3, 0.4, 0.5, 1, 5];
+const MOVE_STEPS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 5];
 let moveStep = 1;   // mm per arrow press, drag snap and size handle; picked bottom left of the view
-let plate = { w: 200, d: 200, every: 10 };   // the grid, for this session
-// Part colours are the model's own content (filament colours), not interface colour. Every
+let plate = { w: 600, d: 600, every: 1 };   // the grid, for this session
+// Part colors are the model's own content (filament colors), not interface color. Every
 // swatch carries its name and the chosen name is shown as text, so no choice rests on hue.
-const COLOURS = [
-  ['Default', ''], ['White', '#f2f2f2'], ['Light gray', '#c4c4c4'], ['Gray', '#8a8a8a'], ['Dark gray', '#4a4a4a'], ['Black', '#1e1e1e'],
+const COLORS = [
+  ['White', '#f2f2f2'], ['Light gray', '#c4c4c4'], ['Gray', '#8a8a8a'], ['Dark gray', '#4a4a4a'], ['Black', '#1e1e1e'],
   ['Red', '#d32f2f'], ['Orange', '#f57c00'], ['Yellow', '#fbc02d'], ['Gold', '#c9a227'], ['Lime', '#9ccc65'], ['Green', '#388e3c'],
   ['Olive', '#827717'], ['Teal', '#00897b'], ['Cyan', '#00acc1'], ['Blue', '#1e88e5'], ['Navy', '#283593'], ['Purple', '#7b1fa2'],
   ['Magenta', '#c2185b'], ['Pink', '#f48fb1'], ['Brown', '#6d4c41'], ['Tan', '#c8a27a'], ['Silver', '#a8b0b8'], ['Copper', '#b87333'],
 ];
 let paletteOpen = false;   // stays open while picking, across inspector redraws
-const colourName = hex => (COLOURS.find(c => c[1].toLowerCase() === (hex || '').toLowerCase()) || [hex ? hex.toUpperCase() : 'Default'])[0];
+const colorName = hex => (COLORS.find(c => c[1].toLowerCase() === (hex || '').toLowerCase()) || [hex ? hex.toUpperCase() : 'Plain gray'])[0];
 
-/** Colour row: swatch + name, opens a named palette with a hex field. */
-function colourPicker(current, onpick) {
+/** Color row: swatch + name, opens a named palette with a hex field. */
+function colorPicker(current, onpick) {
   const swatch = h('span', { class: 'swatch' + (current ? '' : ' none'), style: current ? `background:${current}` : '' });
-  const label = h('span', { class: 'cname' }, colourName(current));
+  const label = h('span', { class: 'cname' }, colorName(current));
   const grid = h('div', { class: 'palette', style: paletteOpen ? '' : 'display:none' });
-  for (const [name, hex] of COLOURS) {
+  for (const [name, hex] of COLORS) {
     grid.append(h('button', { type: 'button', class: 'sw' + (hex === (current || '') ? ' on' : '') + (hex ? '' : ' none'), title: name,
       style: hex ? `background:${hex}` : '', onclick: () => onpick(hex) }));
   }
@@ -50,8 +51,8 @@ function colourPicker(current, onpick) {
   hexIn.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') hexIn.blur(); });
   hexIn.addEventListener('change', () => { const v = hexIn.value.trim(); if (/^#?[0-9a-f]{6}$/i.test(v)) onpick((v[0] === '#' ? v : '#' + v).toLowerCase()); else hexIn.classList.add('bad'); });
   grid.append(h('div', { class: 'hexrow' }, 'Hex', hexIn));
-  const toggle = button('Colour', () => { paletteOpen = !paletteOpen; grid.style.display = paletteOpen ? '' : 'none'; }, { small: true });
-  return h('div', {}, h('div', { class: 'colourrow' }, swatch, label, toggle), grid);
+  const toggle = button('Color', () => { paletteOpen = !paletteOpen; grid.style.display = paletteOpen ? '' : 'none'; }, { small: true });
+  return h('div', {}, h('div', { class: 'colorrow' }, swatch, label, toggle), grid);
 }
 
 // ---- workers ------------------------------------------------------------------------------
@@ -77,10 +78,25 @@ class Pool {
   failAll(kind, err) { for (const [id, j] of this.jobs) if (j.kind === kind) { this.jobs.delete(id); j.rej(err); } }
   call(kind, msg, transfer = [], onProgress = null) {
     const id = ++this.seq;
-    return new Promise((res, rej) => {
+    const t0 = performance.now();
+    const p = new Promise((res, rej) => {
       this.jobs.set(id, { kind, res, rej, onProgress });
       this.w[kind].postMessage({ ...msg, id }, transfer);
     });
+    // A browser keeps a worker's peak memory (and the solid engine's never shrinks), so a
+    // worker that has done heavy work is replaced once idle. The reader holds nothing; the
+    // modeller's cache is refilled from the meshes this page already has.
+    p.finally(() => { if (kind === 'io' || performance.now() - t0 > 3000) this.recycleSoon(kind); }).catch(() => {});
+    return p;
+  }
+  recycleSoon(kind) {
+    clearTimeout(this.timers?.[kind]);
+    (this.timers ||= {})[kind] = setTimeout(() => {
+      if ([...this.jobs.values()].some(j => j.kind === kind)) { this.recycleSoon(kind); return; }
+      this.w[kind].terminate();
+      this.w[kind] = this.spawn(kind);
+      if (kind === 'kern') { sentBlobs.clear(); reseed(); }
+    }, 1500);
   }
   msg(d) {
     const j = this.jobs.get(d.id);
@@ -92,6 +108,13 @@ class Pool {
 }
 const pool = new Pool();
 const sentBlobs = new Set();
+/** A fresh modeller: give it the stored meshes and every shape this page already holds. */
+async function reseed() {
+  await sendBlobs();
+  const items = [];
+  for (const [id, m] of meshes) if (id !== 'preview' && m?.tris) items.push({ key: m.key, tris: m.tris.slice() });
+  if (items.length) await pool.call('kern', { type: 'seed', items }, items.map(x => x.tris.buffer));
+}
 
 // ---- state --------------------------------------------------------------------------------
 let doc = new Doc();
@@ -103,16 +126,16 @@ let step = null;               // a tool step being set up: {tool, params, partI
 let clipboard = null;
 let lastDup = null;
 let fmt = 'stl';
+let fileName = null;   // the .wt3d this doc came from or was last saved to
 
 // ---- layout -------------------------------------------------------------------------------
 const app = document.getElementById('app');
-const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf', multiple: true, style: 'display:none' });
+const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf,.wt3d', multiple: true, style: 'display:none' });
+const projInput = h('input', { type: 'file', accept: '.wt3d', style: 'display:none' });
 const projLabel = h('button', { type: 'button', class: 'file', onclick: () => renameProject() });
 const projBtn = button('Save as project', () => pickProjectFolder(), { small: true });
 const reopenBtn = button('Reopen', () => reopenLast(), { small: true, title: 'Reopen the last project' });
 reopenBtn.style.display = 'none';
-const btnUndo = button('Undo', () => undo(), { title: 'Ctrl+Z' });
-const btnRedo = button('Redo', () => redo(), { title: 'Ctrl+Y' });
 // grid: width, depth and line spacing, in a small panel under its button
 const gridPop = h('div', { class: 'card pop', style: 'display:none' });
 function showGridPop(on) {
@@ -120,22 +143,123 @@ function showGridPop(on) {
   if (!on) return;
   const set = (k, v) => { plate = { ...plate, [k]: v }; viewer.setPlate(plate); status(`Grid ${+plate.w.toFixed(2)} x ${+plate.d.toFixed(2)} mm, a line every ${+plate.every.toFixed(2)} mm.`); };
   gridPop.replaceChildren(h('h3', {}, 'Grid'),
-    ui.numfield('Width', plate.w, 'mm', v => set('w', v), { min: 10, max: 5000, step: 10, lazy: true, digits: 1 }),
-    ui.numfield('Depth', plate.d, 'mm', v => set('d', v), { min: 10, max: 5000, step: 10, lazy: true, digits: 1 }),
-    ui.numfield('Line every', plate.every, 'mm', v => set('every', v), { min: 0.5, max: 500, step: 1, lazy: true, digits: 1 }),
+    ui.numfield('Width', plate.w, 'mm', v => set('w', v), { min: 0.1, step: 10, lazy: true, digits: 1 }),
+    ui.numfield('Depth', plate.d, 'mm', v => set('d', v), { min: 0.1, step: 10, lazy: true, digits: 1 }),
+    ui.numfield('Line every', plate.every, 'mm', v => set('every', v), { min: 0.01, step: 1, lazy: true, digits: 2 }),
     h('div', { class: 'note' }, 'Kept for this session.'),
     h('div', { class: 'row' }, button('Done', () => showGridPop(false), { small: true })));
 }
+// ---- tooltips and color schemes (remembered on this computer, with the home folder) ------------
+// Tooltips: any control's title becomes its tip, shown only when switched on; a greyed control's
+// tip says why it is off. Schemes: one accent family each, so nothing rests on telling hues apart.
+let tipsOn = false, scheme = 'green';
+const SCHEMES = [
+  ['green', 'Green', 'The default: greens and grays'],
+  ['blue', 'Blue', 'Blues and grays, for red-green color blindness'],
+  ['mono', 'High contrast', 'White and grays only, the most contrast'],
+];
+const tipBox = h('div', { class: 'tipbox', role: 'tooltip' });
+document.body.append(tipBox);
+let tipTimer = 0, tipFor = null;
+document.addEventListener('pointerover', e => {
+  const el = e.target.closest?.('[title], [data-tip]');
+  if (el?.title) { el.dataset.tip ||= el.title; el.removeAttribute('title'); }   // never the browser's own
+  if (el === tipFor) return;
+  tipFor = el; clearTimeout(tipTimer); tipBox.style.display = 'none';
+  if (!el || !tipsOn || !el.dataset.tip) return;
+  tipTimer = setTimeout(() => {
+    tipBox.textContent = el.dataset.tip;
+    tipBox.style.display = 'block';
+    const r = el.getBoundingClientRect(), w = tipBox.offsetWidth, hh = tipBox.offsetHeight;
+    tipBox.style.left = Math.max(4, Math.min(innerWidth - w - 4, r.left)) + 'px';
+    tipBox.style.top = (r.bottom + 6 + hh > innerHeight ? r.top - hh - 6 : r.bottom + 6) + 'px';
+  }, 400);
+});
+document.addEventListener('pointerdown', () => { clearTimeout(tipTimer); tipBox.style.display = 'none'; });
+function setTips(on) { tipsOn = on; if (!on) tipBox.style.display = 'none'; folders.remember('tips', on).catch(() => {}); status(on ? 'Tooltips on.' : 'Tooltips off.'); }
+function setScheme(id, quiet = false) {
+  scheme = id;
+  document.documentElement.dataset.scheme = id;
+  viewer?.setScheme?.(id);
+  if (!quiet) { folders.remember('scheme', id).catch(() => {}); status(`Color scheme: ${SCHEMES.find(s => s[0] === id)[1]}.`); }
+}
+folders.recall('tips').then(v => { if (v) tipsOn = true; });
+folders.recall('scheme').then(v => { if (SCHEMES.some(s => s[0] === v)) setScheme(v, true); });
+
+// ---- menu bar: File, Edit, View ---------------------------------------------------------------
+// items: [label, action, {key, tip, on: () => checked, off: () => disabled}] or '-' for a rule.
+// A ticked item shows a tick mark, so the state never rests on color.
+let openMenu = null;
+function closeMenus() { if (openMenu) { openMenu.classList.remove('open'); openMenu = null; } }
+function menu(title, items) {
+  const list = h('div', { class: 'mlist', role: 'menu' });
+  const head = h('button', { type: 'button', class: 'mtitle', 'aria-haspopup': 'true' }, title);
+  const el = h('div', { class: 'menu' }, head, list);
+  const fill = () => list.replaceChildren(...items.map(it => {
+    if (it === '-') return h('div', { class: 'mrule' });
+    const [label, act, o = {}] = it;
+    const b = h('button', { type: 'button', class: 'mitem', role: o.on ? 'menuitemcheckbox' : 'menuitem', title: o.tip || '' },
+      h('span', { class: 'mtick' }, o.on ? (o.on() ? '\u2713' : '') : ''), h('span', { class: 'mlabel' }, label), h('span', { class: 'mkey' }, o.key || ''));
+    if (o.on) b.setAttribute('aria-checked', String(!!o.on()));
+    // greyed, never removed: why it is off goes in its tip (shown when tooltips are on)
+    const why = o.off?.();
+    b.disabled = !!why;
+    if (why) b.dataset.tip = typeof why === 'string' ? why : (o.why || 'Not available with this selection');
+    b.onclick = () => { closeMenus(); act(); };
+    return b;
+  }));
+  head.onclick = e => { e.stopPropagation(); const was = openMenu === el; closeMenus(); if (!was) { fill(); el.classList.add('open'); openMenu = el; } };
+  head.onmouseenter = () => { if (openMenu && openMenu !== el) { closeMenus(); fill(); el.classList.add('open'); openMenu = el; } };
+  return el;
+}
+document.addEventListener('pointerdown', e => { if (openMenu && !openMenu.contains(e.target)) closeMenus(); });
+const none = () => !sel.length && 'Select a part first';
+const menubar = h('nav', { class: 'menubar' },
+  menu('File', [
+    ['New', () => newProject(), { tip: 'Start an empty project' }],
+    ['Open...', () => openProject(), { tip: 'Open a project folder, or a .wt3d project file' }],
+    ['Save file...', () => saveProjectFile(), { tip: 'The whole project as one .wt3d file: parts stay editable, meshes stay exact' }],
+    '-',
+    ['Import...', () => importInput.click(), { tip: 'Add an STL, 3MF or OBJ as a part, or the parts of a .wt3d project' }],
+    ['Export...', () => exportDialog(), { key: 'Ctrl+E', tip: 'Write the model as STL, 3MF or OBJ for a slicer' }],
+    ['Export as...', () => exportModel(true), { key: 'Ctrl+Shift+E', tip: 'Export to a place you pick, in the last type used' }],
+  ]),
+  menu('Edit', [
+    ['Undo', () => undo(), { key: 'Ctrl+Z', off: () => !doc.at && 'Nothing to undo' }],
+    ['Redo', () => redo(), { key: 'Ctrl+Y', off: () => doc.at >= doc.history.length && 'Nothing to redo' }],
+    '-',
+    ['Copy', () => copySel(), { key: 'Ctrl+C', off: none }],
+    ['Paste', () => paste(), { key: 'Ctrl+V', off: () => !clipboard && 'Copy a part first' }],
+    ['Duplicate', () => duplicateSel(), { key: 'Ctrl+D', off: none }],
+    ['Delete', () => deleteSel(), { key: 'Del', off: none }],
+    ['Select all', () => setSel(doc.parts.filter(p => !p.hidden).map(p => p.id)), { key: 'Ctrl+A' }],
+    '-',
+    ['Group', () => groupSel(), { key: 'Ctrl+G', off: () => sel.length < 2 && 'Select two or more parts' }],
+    ['Intersect', () => groupSel('intersect'), { key: 'Ctrl+I', off: () => sel.length < 2 && 'Select two or more parts', tip: 'Keep only where the selected parts overlap' }],
+    ['Ungroup', () => ungroupSel(), { key: 'Ctrl+Shift+G', off: () => !sel.some(id => doc.top(id)?.kind === 'group') && 'Select a group: this is a single piece' }],
+    '-',
+    ['Mirror X', () => mirrorSel(0), { key: 'M', off: none }],
+    ['Mirror Y', () => mirrorSel(1), { key: 'Shift+M', off: none }],
+    ['Mirror Z', () => mirrorSel(2), { key: 'Alt+M', off: none }],
+    ['Drop to plate', () => dropToPlate(), { key: 'D', off: none }],
+    ['Lock / unlock', () => toggleLock(), { key: 'Ctrl+L', off: none }],
+    ['Hide', () => hideSel(), { key: 'Ctrl+H', off: none }],
+    ['Show all', () => showAll(), { key: 'Ctrl+Shift+H' }],
+  ]),
+  menu('View', [
+    ['Show faults', () => setFaults(!faultsOn), { on: () => faultsOn, tip: 'Mark where parts are not closed: open, over-shared and wrongly turned edges, in yellow' }],
+    ['Show grid', () => { gridOn = !gridOn; viewer.setGrid(gridOn); }, { on: () => gridOn }],
+    ['Grid...', () => showGridPop(true), { tip: 'Grid size and line spacing' }],
+    '-',
+    ['Tooltips', () => setTips(!tipsOn), { on: () => tipsOn, tip: 'Show what a control does when the pointer rests on it' }],
+    '-',
+    ...SCHEMES.map(([id, label, tip]) => [label, () => setScheme(id), { on: () => scheme === id, tip }]),
+  ]),
+);
 const header = h('header', {},
-  button('New', () => newProject(), { title: 'Start an empty project' }),
-  button('Open', () => openProject(), { title: 'Open a project folder' }),
-  button('Import', () => importInput.click(), { title: 'Add an STL, 3MF or OBJ as a part (Ctrl+I is intersect)' }),
-  seg([['stl', 'STL'], ['3mf', '3MF'], ['obj', 'OBJ']], fmt, v => { fmt = v; }),
-  button('Export', () => exportModel(), { title: 'Join every solid part into one closed solid, into exports/ (Ctrl+E)' }),
-  button('Export as...', () => exportModel(true), { title: 'Export to a place you pick (Ctrl+Shift+E)' }),
-  btnUndo, btnRedo,
-  h('span', { class: 'popwrap' }, button('Grid', () => showGridPop(gridPop.style.display === 'none'), { title: 'Grid size and line spacing' }), gridPop),
-  h('span', { class: 'spacer' }), projLabel, reopenBtn, projBtn, importInput);
+  menubar,
+  h('span', { class: 'popwrap' }, gridPop),
+  h('span', { class: 'spacer' }), projLabel, reopenBtn, projBtn, importInput, projInput);
 
 const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => {
   const b = button(k[0].toUpperCase() + k.slice(1), () => addShape(k), { title: `Add a ${k} on the plate` });
@@ -154,6 +278,7 @@ const panes = { shapes: h('div', { class: 'pane', style: 'display:none' }, card(
 let curTab = 'parts';
 const tabs = seg([['shapes', 'Shape tools'], ['parts', 'Parts']], 'parts', v => showTab(v));
 tabs.classList.add('tabs');
+tabs.addEventListener('click', () => { if (app.classList.contains('folded')) fold.click(); });
 function showTab(v) {
   if (v === curTab) return;
   curTab = v;
@@ -162,7 +287,14 @@ function showTab(v) {
   renderParts();
   renderInspector();
 }
-const aside = h('aside', {}, tabs, panes.parts, panes.shapes);
+// the arrow rolls the panel up to its tab row, and the view takes the width
+const fold = h('button', { class: 'fold', title: 'Roll the panel up' }, '▴');
+fold.onclick = () => {
+  const up = app.classList.toggle('folded');
+  fold.textContent = up ? '▾' : '▴';
+  fold.title = up ? 'Roll the panel down' : 'Roll the panel up';
+};
+const aside = h('aside', {}, h('div', { class: 'tabrow' }, tabs, fold), panes.parts, panes.shapes);
 
 const view = h('div', { id: 'view' });
 const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF or OBJ here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
@@ -170,14 +302,63 @@ let cutAxis = null, cutAt = 50;
 const cutRange = ui.slider('at', cutAt, '%', { min: 0, max: 100, step: 0.5, digits: 1 }, v => { cutAt = v; if (cutAxis) viewer.setClip(cutAxis, v / 100); });
 cutRange.classList.add('cut');
 const cutSeg = seg([['off', 'Off'], ['x', 'X'], ['y', 'Y'], ['z', 'Z']], 'off', v => { cutAxis = v === 'off' ? null : v; viewer.setClip(cutAxis, cutAt / 100); });
+let faultsOn = false, gridOn = true;
+
+// ---- the 0.05 mm lattice --------------------------------------------------------------------------
+// Every part's low corner (least X, least Y, bottom Z) sits on a 0.05 mm lattice, so parts that
+// meet really meet. Moves go in whole steps and keep it there; anything that lands off it
+// (rotate, scale, mirror, mid align, a typed position, an old project's first move) is moved
+// by under 0.025 mm to the nearest point.
+const LATTICE = 0.05;
+const onLattice = v => Math.round(v / LATTICE) * LATTICE;
+function cornerFix(p, xform = p.xform) {
+  const b = worldBox(p, xform);
+  if (!b) return [0, 0, 0];
+  return [b.min.x, b.min.y, b.min.z].map(v => { const d = onLattice(v) - v; return Math.abs(d) < 1e-7 ? 0 : d; });
+}
+function snapped(p, xform) {
+  const f = cornerFix(p, xform);
+  return { ...xform, pos: xform.pos.map((v, i) => +(v + f[i]).toFixed(6)) };
+}
+
+let rotateOn = false, ringsHeld = false;   // turn rings: the Rotate box, or R held down
+function setFaults(on) {
+  faultsOn = on;
+  viewer.setFaults(on);
+  if (!on) { status('Faults hidden.'); return; }
+  const found = [];
+  for (const [id, o] of viewer.objs) {
+    const f = o.faultCount;
+    if (!f || !f.segs.length) continue;
+    const bits = [f.open && `${f.open} open`, f.over && `${f.over} over-shared`, f.flipped && `${f.flipped} turned`].filter(Boolean);
+    found.push(`${doc.top(id)?.name || 'a part'}: ${bits.join(', ')} edges`);
+  }
+  status(found.length ? `Faults in yellow. ${found.join('; ')}.` : 'No faults: every part is closed.');
+}
+// view icons: a cube with the face you will look at filled; Fit is four corners
+const cube = (face, mirror) => `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"${mirror ? ' style="transform:scaleX(-1)"' : ''}>`
+  + `<path d="M12 3 21 7.5 12 12 3 7.5Z" ${face === 'top' ? 'fill="currentColor"' : ''}/>`
+  + `<path d="M3 7.5 12 12V21L3 16.5Z" ${face === 'front' ? 'fill="currentColor"' : ''}/>`
+  + `<path d="M21 7.5 12 12V21L21 16.5Z" ${face === 'right' ? 'fill="currentColor"' : ''}/></svg>`;
+const VIEW_ICONS = {
+  iso: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+  top: cube('top'),
+  // front: seen face on, the top just showing above it
+  front: '<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M4 9 7 5H17L20 9Z"/><path d="M4 9H20V20H4Z" fill="currentColor"/></svg>',
+  left: cube('front'), right: cube('right'),
+};
 const views = h('div', { class: 'overlay tl' },
-  ...[['iso', 'Fit (F)'], ['top', 'Top'], ['front', 'Front'], ['right', 'Right']].map(([k, l]) => button(l, () => viewer.view(k, k === 'iso' ? sel : []), { small: true })));
+  ...[['iso', 'Fit (F)'], ['top', 'Top'], ['front', 'Front'], ['left', 'Left'], ['right', 'Right']].map(([k, l]) => {
+    const b = h('button', { type: 'button', class: 'viewbtn', title: l, 'aria-label': l, onclick: () => viewer.view(k, k === 'iso' ? sel : []) });
+    b.innerHTML = VIEW_ICONS[k];
+    return b;
+  }));
 cutSeg.title = 'Cut the view open along X, Y or Z';
 const cut = h('div', { class: 'overlay cutbar' }, cutSeg, cutRange);
 const pastBanner = h('div', { class: 'banner', style: 'display:none' });
 // move step: one column of buttons, bottom left
 const moveBtns = MOVE_STEPS.map(v => h('button', { type: 'button', class: 'movestep' + (v === moveStep ? ' on' : ''),
-  title: `Move in ${v} mm steps (arrows, drag)`, onclick: () => setMoveStep(v) }, v.toFixed(1)));
+  title: `Move in ${v} mm steps (arrows, drag)`, onclick: () => setMoveStep(v) }, ...(v < 0.1 ? ['0.', h('br'), v.toFixed(2).slice(2)] : [v.toFixed(1)])));
 const moveCol = h('div', { class: 'overlay bl' }, h('span', { class: 'lbl' }, 'mm'), ...moveBtns);
 function setMoveStep(v) {
   moveStep = v;
@@ -246,7 +427,7 @@ async function refresh() {
     try {
       const key = shapeKey(p);
       const r = await pool.call('kern', { type: 'mesh', part: p }, [], (f, t) => status(`${p.name}: ${t}...`));
-      meshes.set(p.id, { key, tris: r.tris, volume: r.volume });
+      meshes.set(p.id, { key, tris: r.tris, volume: r.volume, open: r.open });
     } catch (err) {
       status(`${p.name}: ${err.message}`, true);
     }
@@ -268,6 +449,7 @@ async function sendBlobs() {
 
 function setSel(ids) {
   endPast(false);
+  if (facePlane && !(ids.length === 1 && ids[0] === facePlane.id)) facePlane = null;
   sel = ids.filter(id => doc.top(id));
   viewer.select(sel);
   renderParts();
@@ -275,14 +457,79 @@ function setSel(ids) {
 }
 
 // ---- shapes and parts list -------------------------------------------------------------------
-function addShape(kind) {
+// Adding a shape: a see-through copy follows the pointer. On a part's face it turns to sit flat
+// on that face; on the plate it stands upright with its corner on the lattice. Click places it,
+// Enter places it at the default spot, Esc cancels. A part placed on a face keeps that face's
+// plane: until it is deselected, the arrows slide it along the plane.
+let placing = null;     // {kind, params, lb, xform, face}
+let facePlane = null;   // {id, n, u, v} while a part just placed on a face stays selected
+function defaultSpot() {
   const n = doc.parts.length;
-  // drop new shapes in a loose spiral so they do not land inside each other
+  // a loose spiral so new shapes do not land inside each other
   const a = n * 2.4, r = n ? 12 + 6 * Math.sqrt(n) : 0;
-  const id = doc.add({ kind, params: { ...SHAPES[kind] }, xform: { pos: [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a)), 0], rot: [0, 0, 0], scale: [1, 1, 1] } });
-  setSel([id]);
-  status(`Added ${doc.top(id).name}.`);
+  return { pos: [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a)), 0], rot: [0, 0, 0], scale: [1, 1, 1] };
 }
+async function addShape(kind) {
+  cancelPlace();
+  const params = { ...SHAPES[kind] };
+  const my = placing = { kind, params, xform: null, face: null };
+  try {
+    const r = await pool.call('kern', { type: 'mesh', part: { id: 'ghost', kind, params, xform: IDENT() } });
+    if (placing !== my) return;
+    my.lb = localBounds(r.tris);
+    viewer.startPlace(r.tris);
+    status(`Place the ${kind}: click a face or the plate. Enter: default spot. Esc: cancel.`);
+  } catch (err) { placing = null; status(err.message, true); }
+}
+function cancelPlace() { if (placing) { placing = null; viewer.endPlace(); } }
+function placeAt(hit) {
+  if (!placing?.lb) return;
+  if (hit?.normal) {
+    // bottom (local -Z side, at z = 0) flat on the face: local +Z along the face's normal
+    const n = hit.normal.clone().normalize();
+    // two steps, as JD asked: turn about the vertical (in the grid plane) until a face points down
+    // the slope, then tilt about that edge by the slope angle; never corner-first
+    const q = n.z > 0.99996 ? new Quaternion() : new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), Math.atan2(n.y, n.x))
+      .multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), Math.acos(Math.max(-1, Math.min(1, n.z)))));
+    const e = new Euler().setFromQuaternion(q, 'XYZ');
+    placing.xform = { pos: [hit.point.x, hit.point.y, hit.point.z].map(v => +v.toFixed(6)), rot: [e.x, e.y, e.z].map(v => +(v * 180 / Math.PI).toFixed(6)), scale: [1, 1, 1] };
+    placing.face = hit.normal.clone();
+  } else if (hit) {
+    const lb = placing.lb, cx = (lb.lo[0] + lb.hi[0]) / 2, cy = (lb.lo[1] + lb.hi[1]) / 2;
+    // corner on the lattice
+    const x = onLattice(hit.point.x - cx + lb.lo[0]) - lb.lo[0], y = onLattice(hit.point.y - cy + lb.lo[1]) - lb.lo[1];
+    placing.xform = { pos: [+x.toFixed(6), +y.toFixed(6), +(-lb.lo[2]).toFixed(6)], rot: [0, 0, 0], scale: [1, 1, 1] };
+    placing.face = null;
+  } else return;
+  viewer.setGhost(placing.xform);
+}
+function commitPlace(useDefault = false) {
+  if (!placing) return;
+  const p = placing;
+  if (!useDefault && !p.xform) return;
+  cancelPlace();
+  const id = doc.add({ kind: p.kind, params: p.params, xform: useDefault || !p.xform ? defaultSpot() : p.xform });
+  setSel([id]);
+  if (!useDefault && p.face) {
+    const { u, v } = viewer.planeAxes(p.face);
+    facePlane = { id, n: p.face, u, v };
+  }
+  status(`Added ${doc.top(id).name}${facePlane?.id === id ? ': arrows slide it along that face until you click off it' : ''}.`);
+}
+// Shift+F: click any face, and the selected part slides along that face's plane with the arrows
+// until you click off it.
+function startSlidePick() {
+  if (sel.length !== 1) { status('Select one part, then Shift+F and click a face.'); return; }
+  viewer.pickingFace = true;
+  status('Click a face to slide along. Esc cancels.');
+}
+viewer.onPickFace = hit => {
+  if (!hit?.normal) { status('No face there: slide not set.'); return; }
+  const { u, v } = viewer.planeAxes(hit.normal);
+  facePlane = { id: sel[0], n: hit.normal, u, v };
+  status(`${doc.top(sel[0]).name} slides along that face: arrows, Ctrl+Up/Down off and into it. Click empty space to end.`);
+};
+viewer.onPlace = (what, hit) => { if (what === 'move') placeAt(hit); else { placeAt(hit); commitPlace(); } };
 
 // The parts list. A single selected part shows its options right under its row (the arrow
 // folds them away); several selected show theirs under the list. The options element is
@@ -340,13 +587,19 @@ function renderInspector(live = null) {
   inspector.style.display = '';
   if (sel.length > 1) {
     const first = doc.top(sel[0]);
+    const ungroupBtn = button('Ungroup', () => ungroupSel(), { title: 'Ctrl+Shift+G' });
     inspector.replaceChildren(h('div', { class: 'sub' }, `${sel.length} parts selected`),
-      colourPicker(sel.every(id => doc.top(id)?.color === first?.color) ? first?.color : '', hex => {
+      colorPicker(sel.every(id => doc.top(id)?.color === first?.color) ? first?.color : '', hex => {
         const ids = editable();
-        if (ids.length) doc.update(ids, `Colour ${ids.length} parts: ${colourName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; });
+        if (ids.length) doc.update(ids, `Color ${ids.length} parts: ${colorName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; });
       }),
-      h('div', { class: 'row' }, button('Group', () => groupSel(), { title: 'Ctrl+G' }), button('Intersect', () => groupSel('intersect'), { title: 'Ctrl+I' })),
-      h('div', { class: 'row' }, button('Align', () => status('Align is not built yet.')), button('Delete', () => deleteSel(), { title: 'Delete' })));
+      h('div', { class: 'row' }, button('Group', () => groupSel(), { title: 'Ctrl+G' }), button('Intersect', () => groupSel('intersect'), { title: 'Ctrl+I' }), ungroupBtn),
+      h('div', { class: 'sub' }, 'Align'),
+      ...['X', 'Y', 'Z'].map((a, i) => h('div', { class: 'row align' }, h('span', { class: 'axis' }, a),
+        ...[['Min', 0], ['Mid', 0.5], ['Max', 1]].map(([l, f]) => button(l, () => alignSel(i, f), { small: true })))),
+      h('div', { class: 'row' }, button('Delete', () => deleteSel(), { title: 'Delete' })));
+    ungroupBtn.disabled = !sel.some(id => doc.top(id)?.kind === 'group');
+    if (ungroupBtn.disabled) ui.tip(ungroupBtn, 'None of these is a group');
     return;
   }
   const p = live || doc.top(sel[0]);
@@ -357,7 +610,7 @@ function renderInspector(live = null) {
   const body = [
     seg([['solid', 'Solid'], ['hole', 'Hole']], p.hole ? 'hole' : 'solid', v => upd(v === 'hole' ? `${p.name} to hole` : `${p.name} to solid`, q => { q.hole = v === 'hole'; })),
   ];
-  if (!p.hole) body.push(colourPicker(p.color, hex => upd(`${p.name} colour: ${colourName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; })));
+  if (!p.hole) body.push(colorPicker(p.color, hex => upd(`${p.name} color: ${colorName(hex)}`, q => { if (hex) q.color = hex; else delete q.color; })));
   // history of this part: drag through it to watch it being made; Keep rolls it back
   const tl = doc.timeline(p.id);
   if (tl.length > 1) {
@@ -375,23 +628,26 @@ function renderInspector(live = null) {
     for (const [k, v] of Object.entries(p.params)) {
       const facets = k === 'sides' || k === 'tubeSides';
       body.push(ui.numfield(LABELS[k] || k, v, facets ? '' : 'mm', nv => upd(`${p.name}: ${(LABELS[k] || k).toLowerCase()} ${nv}`, q => { q.params[k] = facets ? Math.round(nv) : nv; }),
-        { min: facets ? 3 : k === 'd2' || k === 'd1' ? 0 : 0.01, max: facets ? 512 : 5000, step: facets ? 4 : 1, lazy: true, digits: facets ? 0 : 3 }));
+        { min: facets ? 3 : k === 'd2' || k === 'd1' ? 0 : 0.0001, step: facets ? 4 : 1, lazy: true, digits: facets ? 0 : 4 }));
     }
   }
+  if (p.kind === 'group') body.push(h('div', { class: 'row' }, button('Ungroup', () => ungroupSel(), { title: 'Ctrl+Shift+G' })));
   // where the part really is: its middle in X and Y, its lowest point in Z (0 = on the plate)
   const wb = worldBox(p, p.view || p.xform);
   body.push(h('div', { class: 'sub' }, 'Position'));
   if (wb) {
     const at = [(wb.min.x + wb.max.x) / 2, (wb.min.y + wb.max.y) / 2, wb.min.z];
-    [['Centre X', 0], ['Centre Y', 1], ['Bottom Z', 2]].forEach(([label, i]) => body.push(ui.numfield(label, +at[i].toFixed(4), 'mm',
-      v => upd(`Move ${p.name}`, q => { q.xform.pos[i] = +(q.xform.pos[i] + v - at[i]).toFixed(6); }), { step: moveStep, lazy: true, digits: 3 })));
+    [['Center X', 0], ['Center Y', 1], ['Bottom Z', 2]].forEach(([label, i]) => body.push(ui.numfield(label, +at[i].toFixed(4), 'mm',
+      v => upd(`Move ${p.name}`, q => { q.xform.pos[i] = +(q.xform.pos[i] + v - at[i]).toFixed(6); q.xform = snapped(q, q.xform); }), { step: moveStep, lazy: true, digits: 3 })));
   }
   body.push(h('div', { class: 'sub' }, 'Rotation (about its middle)'));
+  const rot = ui.tip(ui.check('Rotate part', rotateOn, v => { rotateOn = v; viewer.setRings(v); }), 'Shows the turn rings. Holding R shows them too.');
+  body.push(rot);
   ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.rot[i], 'deg',
     v => upd(`Rotate ${p.name}`, q => { const r = [...q.xform.rot]; r[i] = v; q.xform = rotated(q, r); }), { step: 15, lazy: true, digits: 3 })));
   if (!p.params || p.xform.scale.some(v => v !== 1)) {
     body.push(h('div', { class: 'sub' }, 'Scale'));
-    ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.scale[i] * 100, '%', v => upd(`Scale ${p.name}`, q => { q.xform.scale[i] = v / 100; }), { min: 0.1, max: 100000, step: 10, lazy: true, digits: 3 })));
+    ['X', 'Y', 'Z'].forEach((a, i) => body.push(ui.numfield(a, p.xform.scale[i] * 100, '%', v => upd(`Scale ${p.name}`, q => { q.xform.scale[i] = v / 100; q.xform = snapped(q, q.xform); }), { min: 0.0001, step: 10, lazy: true, digits: 4 })));
   }
   // steps
   body.push(h('div', { class: 'sub' }, 'Steps'));
@@ -400,10 +656,14 @@ function renderInspector(live = null) {
     body.push(h('div', { class: 'steprow' }, h('span', {}, `${i + 1}. ${t?.stepLabel?.(op.params) || t?.title || op.tool}`),
       button('Remove', () => upd(`Remove step ${i + 1} from ${p.name}`, q => { q.ops.splice(i, 1); }), { small: true })));
   });
-  body.push(h('div', { class: 'row wrap' }, ...tools.map(t => button(t.title, () => startStep(t, p.id), { small: true, title: t.blurb }))));
+  // an open mesh can only be repaired; Repair itself only fits an imported mesh with no steps yet
+  const open = m?.open;
+  if (open) body.push(ui.tip(h('div', { class: 'note' }, 'Not closed'), 'It still moves, groups and exports as it is; cutting, hollowing and edge shaping close it for that step. Repair closes it for good.'));
+  const usable = tools.filter(t => !t.appliesTo || t.appliesTo(p));
+  body.push(h('div', { class: 'row wrap' }, ...usable.map(t => button(t.title, () => startStep(t, p.id), { small: true, title: t.blurb }))));
   if (m) {
     const b = wb;
-    body.push(kv([['size', b ? `${mm(b.max.x - b.min.x)} x ${mm(b.max.y - b.min.y)} x ${mm(b.max.z - b.min.z)}` : '-'], ['volume', `${(m.volume / 1000).toFixed(2)} cm3`], ['triangles', count(m.tris.length / 9)]]));
+    body.push(kv([['size', b ? `${mm(b.max.x - b.min.x)} x ${mm(b.max.y - b.min.y)} x ${mm(b.max.z - b.min.z)}` : '-'], ['volume', `${(m.volume / 1000).toFixed(2)} cm3`], ['triangles', count(m.tris.length / 9)], ['STL', `about ${sizeText(stlBytes(m.tris.length / 9))}`]]));
   }
   if (lock) body.push(h('div', { class: 'note' }, 'Locked: Ctrl+L to unlock.'));
   inspector.replaceChildren(...body);
@@ -474,13 +734,13 @@ viewer.onBox = (ids, e) => setSel(e.shiftKey ? [...new Set([...sel, ...ids])] : 
 
 let drag = null;
 viewer.onDragStart = (id, e) => {
-  if (step) return false;
+  // a tool step may stay open: moving a part never changes its shape, so it does not get in the way
   const p = doc.top(id);
   if (!p || p.locked) { if (p?.locked) status(`${p.name} is locked (Ctrl+L).`); return false; }
   if (!sel.includes(id)) setSel([id]);
   let ids = sel.filter(x => !doc.top(x)?.locked);
   if (e.altKey) { ids = doc.duplicate(ids); setSel(ids); }    // Alt: drag a copy
-  drag = { ids, start: new Map(ids.map(x => [x, [...doc.top(x).xform.pos]])), d: [0, 0] };
+  drag = { ids, start: new Map(ids.map(x => { const p = doc.top(x), f = cornerFix(p); return [x, p.xform.pos.map((v, i) => v + f[i])]; })), d: [0, 0] };
   return true;
 };
 viewer.onDrag = (dx, dy, e) => {
@@ -527,6 +787,7 @@ viewer.onHandle = (phase, h, e) => {
     return;
   }
   const d = hdrag; hdrag = null;
+  if (!ringsHeld) viewer.setRings(rotateOn);   // R let go during the turn
   const r = d.next;
   if (!r || r.same) { viewer.sync(doc.parts, meshes); renderInspector(); return; }
   doc.update([d.p.id], r.label, q => { q.params = r.part.params; q.xform = r.part.xform; });
@@ -585,7 +846,8 @@ function nudge(dx, dy, dz) {
   const ids = editable();
   if (!ids.length) return;
   doc.update(ids, `Nudge ${ids.length > 1 ? ids.length + ' parts' : doc.top(ids[0]).name}`, p => {
-    p.xform.pos = p.xform.pos.map((v, i) => +(v + [dx, dy, dz][i]).toFixed(6));
+    const f = cornerFix(p);
+    p.xform.pos = p.xform.pos.map((v, i) => +(v + f[i] + [dx, dy, dz][i]).toFixed(6));
   });
 }
 function dropToPlate() {
@@ -630,9 +892,24 @@ function ungroupSel() {
   for (const id of editable()) if (doc.top(id)?.kind === 'group') out.push(...doc.ungroup(id));
   if (out.length) setSel(out);
 }
+/** Line the selected parts up on one axis: their low sides (0), middles (0.5) or high sides (1)
+ *  to the same side of the box round them all. */
+function alignSel(axis, f) {
+  const ids = editable();
+  if (ids.length < 2) return;
+  const boxes = new Map(ids.map(id => [id, worldBox(doc.top(id))]).filter(([, b]) => b));
+  let lo = Infinity, hi = -Infinity;
+  for (const b of boxes.values()) { lo = Math.min(lo, b.min.getComponent(axis)); hi = Math.max(hi, b.max.getComponent(axis)); }
+  const target = lo + (hi - lo) * f;
+  doc.update([...boxes.keys()], `Align ${'XYZ'[axis]} ${['min', 'mid', 'max'][f * 2]}`, p => {
+    const b = boxes.get(p.id), at = b.min.getComponent(axis) + (b.max.getComponent(axis) - b.min.getComponent(axis)) * f;
+    p.xform.pos[axis] = +(p.xform.pos[axis] + target - at).toFixed(6);
+    p.xform = snapped(p, p.xform);
+  });
+}
 function mirrorSel(axis) {
   const ids = editable();
-  if (ids.length) doc.update(ids, `Mirror ${'XYZ'[axis]}`, p => { p.xform.scale[axis] *= -1; });
+  if (ids.length) doc.update(ids, `Mirror ${'XYZ'[axis]}`, p => { p.xform.scale[axis] *= -1; p.xform = snapped(p, p.xform); });
 }
 function duplicateSel() {
   if (!sel.length) return;
@@ -677,7 +954,7 @@ function startStep(t, partId) {
   const api = {
     params: step.params, ui,
     set(k, v) { step.params[k] = v; stepChanged(); },
-    model: () => lb && { bounds: lb },
+    model: () => lb && { bounds: lb, triangles: m.tris.length / 9 },
     selection: () => step?.face,
     clearSelection: () => { step.face = null; step.walls = []; viewer.setFacePick(null); stepChanged(); },
   };
@@ -720,7 +997,8 @@ async function previewStep() {
     meshes.set('preview', { key: shapeKey(part), tris: r.tris, volume: r.volume });
     viewer.preview(s.partId, r.tris);
     s.previewed = true;
-    status(`${s.tool.title}: preview ready. Apply keeps it.`);
+    s.ui.statusEl.replaceChildren(...(r.notes || []).map(t => h('div', { class: 'note' }, t)));
+    status(`${s.tool.title}: preview ready. ${(r.notes || []).join(' ')} Apply keeps it.`);
   } catch (err) {
     if (step === s) { s.ui.statusEl.replaceChildren(errorLine(err.message)); status(err.message, true); }
   } finally { if (step === s) s.ui.prog.style.display = 'none'; }
@@ -871,7 +1149,7 @@ function rotated(p, rot) {
   const before = c.clone().applyMatrix4(matrix(p.xform));
   const after = c.clone().applyMatrix4(matrix({ ...nx, pos: [0, 0, 0] }));
   nx.pos = [before.x - after.x, before.y - after.y, before.z - after.z].map(v => +v.toFixed(6));
-  return nx;
+  return snapped(p, nx);
 }
 
 function localBounds(t) {
@@ -886,8 +1164,6 @@ function redo() { cancelStep(); const c = doc.redo(); if (c) status(`Redone: ${c
 
 // ---- project folder ------------------------------------------------------------------------
 function updateHeader() {
-  btnUndo.disabled = !doc.at;
-  btnRedo.disabled = doc.at >= doc.history.length;
   if (project) {
     projLabel.textContent = project.error ? '' : `${project.name}  ${project.pending ? 'saving...' : 'saved'}`;
     projLabel.title = 'Click to rename the project';
@@ -911,10 +1187,10 @@ let home = null;
 
 async function noFolderAccess() {
   if (typeof window.showDirectoryPicker === 'function') return false;
-  status('This browser has folder access switched off, so projects cannot be saved. In Brave: brave://flags/#file-system-access-api, Enabled, restart.', true);
-  await ask(h('div', {}, h('p', {}, 'This browser has folder access switched off, so the project cannot be saved to a folder.'),
-    h('p', {}, 'In Brave: put brave://flags/#file-system-access-api in the address bar, set it to Enabled, and restart Brave.'),
-    h('p', {}, 'Edge, Vivaldi and Chromium have it on already. Export still works meanwhile.')));
+  status('Folder access is off in this browser: no automatic project folder. Save file keeps the whole project as one .wt3d.');
+  await ask(h('div', {}, h('p', {}, 'This browser has folder access switched off, so the project is not saved to a folder as you work.'),
+    h('p', {}, 'Save file writes the whole project as one .wt3d file, and Open reads it back. Turning folder access on in Brave: brave://flags/#file-system-access-api, Enabled, restart.'),
+    h('p', {}, 'Edge, Vivaldi and Chromium have it on already.')));
   return true;
 }
 
@@ -1018,6 +1294,7 @@ function resetDoc() {
   sel = [];
   lastDup = null;
   projectAsked = false;
+  fileName = null;
 }
 
 async function newProject() {
@@ -1029,6 +1306,7 @@ async function newProject() {
 
 /** Open: the list of projects, or another folder. */
 async function openProject() {
+  if (!window.showDirectoryPicker) { projInput.click(); return; }   // no folder access: files only
   if (!(await ensureHome())) return;
   const names = await folders.listProjects(home);
   const pick = await new Promise(res => {
@@ -1036,12 +1314,13 @@ async function openProject() {
     const done = v => { d.close(); d.remove(); res(v); };
     const list = h('div', { class: 'projlist' }, ...names.map(n => button(n, () => done(n))));
     if (!names.length) list.append(h('p', {}, 'No projects yet.'));
-    d.append(h('div', {}, 'Open a project'), list, h('div', { class: 'row' }, button('Other folder...', () => done({ other: true })), button('Cancel', () => done(null))));
+    d.append(h('div', {}, 'Open a project'), list, h('div', { class: 'row' }, button('A .wt3d file...', () => done({ file: true })), button('Other folder...', () => done({ other: true })), button('Cancel', () => done(null))));
     d.addEventListener('cancel', () => done(null));
     document.body.append(d);
     d.showModal();
   });
   if (!pick) return;
+  if (pick.file) { projInput.click(); return; }
   if (pick.other) {
     try { await openFolder(await window.showDirectoryPicker({ mode: 'readwrite', id: 'wt3d-other' })); } catch (err) { if (err.name !== 'AbortError') status(err.message, true); }
     return;
@@ -1063,22 +1342,99 @@ async function openFolder(dir) {
   } catch (err) { status(`Could not open ${dir.name}: ${err.message}`, true); }
 }
 
+// ---- project files (.wt3d) --------------------------------------------------------------------
+async function openProjectFile(file) {
+  if (!project && doc.history.length && !(await ask('Drop the current parts? They are not saved.', [['Keep them', false], ['Drop them', true, true]]))) return;
+  try {
+    const { snap, blobs } = await unpackProject(await file.arrayBuffer(), file.name);
+    resetDoc();
+    doc.load(snap, blobs);
+    sentBlobs.clear();
+    fileName = file.name;
+    await refresh();
+    viewer.view('iso');
+    status(`Opened ${file.name}: ${doc.parts.length} parts, ${doc.at} steps. Changes ask for a project folder; Save file writes a .wt3d again.`);
+  } catch (err) { status(`Could not open ${file.name}: ${err.message}`, true); }
+}
+async function saveProjectFile() {
+  if (!doc.parts.length) { status('Nothing to save yet.'); return; }
+  const bytes = packProject(doc);
+  const name = (fileName || (project ? project.name + PROJECT_EXT : 'Untitled' + PROJECT_EXT));
+  if (window.showSaveFilePicker) {
+    let handle;
+    try { handle = await window.showSaveFilePicker({ suggestedName: name, id: 'wt3d-project', types: [{ description: 'Workingtitle3D project', accept: { 'application/octet-stream': [PROJECT_EXT] } }] }); }
+    catch (err) { if (err.name === 'AbortError') { status('Not saved.'); return; } }
+    if (handle) {
+      try {
+        const w = await handle.createWritable(); await w.write(bytes); await w.close();
+        // read it back: the same parts and every mesh
+        await unpackProject(await (await handle.getFile()).arrayBuffer(), handle.name);
+        fileName = handle.name;
+        status(`Saved ${handle.name}: ${doc.parts.length} parts, ${doc.blobs.size} meshes, ${sizeText(bytes.length)}, read back and checked.`);
+      } catch (err) { status(`Could not save: ${err.message}`, true); }
+      return;
+    }
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  const a = h('a', { href: url, download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  status(`Saved ${name} to downloads: ${doc.parts.length} parts, ${sizeText(bytes.length)}.`);
+}
+projInput.addEventListener('change', () => { const f = projInput.files[0]; projInput.value = ''; if (f) openProjectFile(f); });
+
+/** Export: pick the file type, then where. */
+async function exportDialog() {
+  const pick = await new Promise(res => {
+    const d = h('dialog', {});
+    const done = v => { d.close(); d.remove(); res(v); };
+    let f = fmt;
+    d.append(h('div', {}, 'Export for a slicer'),
+      seg([['stl', 'STL'], ['3mf', '3MF'], ['obj', 'OBJ']], f, v => { f = v; }),
+      h('div', { class: 'row' }, button(home ? 'Export to exports/' : 'Export', () => done({ f, pick: false }), { go: true }), button('Choose where...', () => done({ f, pick: true })), button('Cancel', () => done(null))));
+    d.addEventListener('cancel', () => done(null));
+    document.body.append(d);
+    d.showModal();
+  });
+  if (!pick) return;
+  fmt = pick.f;
+  await exportModel(pick.pick);
+}
+
 // ---- import and export ----------------------------------------------------------------------
 async function importFiles(files) {
   for (const file of files) {
     status(`Reading ${file.name}...`);
+    if (file.name.toLowerCase().endsWith(PROJECT_EXT)) {
+      try {
+        const { snap, blobs } = await unpackProject(await file.arrayBuffer(), file.name);
+        const ids = doc.importParts(snap.parts, blobs, `Import ${file.name}`);
+        setSel(ids);
+        status(`Imported ${ids.length} part${ids.length === 1 ? '' : 's'} from ${file.name}.`);
+        viewer.view('iso');
+      } catch (err) { status(`${file.name}: ${err.message}`, true); }
+      continue;
+    }
     try {
       const buf = await file.arrayBuffer();
       const r = await pool.call('io', { type: 'load', name: file.name, buf }, [buf]);
-      if (!r.report.watertight) { status(`${file.name} is ${describe(r.report)}, so it cannot be joined or cut. Repair it first.`, true); continue; }
+      const open = r.report.watertight ? '' : (() => { const f = r.fixes || {}; return ` Not fully closed (${describe(r.report).replace(/^not closed: /, '')}${f.shells ? `; ${f.shells} pieces, ${f.droppedShells || 0} will not close` : ''}). It still works; Repair in its options closes it.`; })();
       const blob = doc.addBlob(r.tris);
       const b = localBounds(r.tris);
+      // out of the way: its corner nearest the middle at 100 mm left and 100 mm back (as the
+      // view sees the plate), on the lattice; the model runs on left and back from there
+      const ax = viewer.screenAxes(new Vector3(0, 0, 0));
+      const pos = [0, 0, -b.lo[2]];
+      for (const [dir, far] of [[ax.right, true], [ax.up, false]]) {
+        const k = dir[0] ? 0 : 1, s = dir[k], a = (far ? -100 : 100) * s;
+        pos[k] = far ? (s > 0 ? a - b.hi[k] : a - b.lo[k]) : (s > 0 ? a - b.lo[k] : a - b.hi[k]);
+      }
       const id = doc.add({ kind: 'mesh', blob, name: file.name.replace(/\.[^.]+$/, ''),
-        xform: { pos: [-(b.lo[0] + b.hi[0]) / 2, -(b.lo[1] + b.hi[1]) / 2, -b.lo[2]], rot: [0, 0, 0], scale: [1, 1, 1] } }, `Import ${file.name}`);
+        xform: { pos: pos.map(v => +v.toFixed(6)), rot: [0, 0, 0], scale: [1, 1, 1] } }, `Import ${file.name}`);
       setSel([id]);
       const f = r.fixes;
-      const fixed = [f.welded && `${count(f.welded)} points welded`, f.degenerate && `${f.degenerate} zero-area dropped`, f.duplicates && `${f.duplicates} duplicates dropped`, f.flipped && 'turned right way out'].filter(Boolean);
-      status(`Imported ${file.name}${fixed.length ? ' (' + fixed.join(', ') + ')' : ''}.`);
+      const fixed = [f.degenerate && `${f.degenerate} zero-area dropped`, f.duplicates && `${f.duplicates} duplicates dropped`, f.tjunctions && `${f.tjunctions} T-junctions split`, f.holes && `${f.holes} holes filled`, f.reoriented && `${f.reoriented} faces re-wound`, f.flipped && 'turned right way out', f.shells > 1 && `${f.shells} shells joined`, f.droppedShells && `${f.droppedShells} unclosable shells left out`, f.bridged && `${f.bridged} touching edges bridged 0.2 mm wide`].filter(Boolean);
+      status(`Imported ${file.name}${fixed.length ? ' (' + fixed.join(', ') + ')' : ''}.${open}`);
       viewer.view('iso');
     } catch (err) { status(`${file.name}: ${err.message}`, true); }
   }
@@ -1111,20 +1467,23 @@ async function exportModel(pick = false) {
   }
   status('Joining parts...');
   const made = !pick && home;   // a file this export created, so it may be removed on a failure
-  let bytes, bridged = 0;
+  let bytes, bridged = 0, openParts = 0, closedText = 'one closed solid';
   try {
     await sendBlobs();
-    let { tris, thin } = await pool.call('kern', { type: 'flatten', parts: doc.parts });
+    let { tris, thin, open } = await pool.call('kern', { type: 'flatten', parts: doc.parts });
     if (thin) {
       // parts only touching along an edge: offer to join them for this file
       const go = await ask(h('div', {}, h('p', {}, thin),
-        h('p', {}, 'Join them with a 0.2 mm wide bridge along where they touch? Only the exported file gets it; the model stays as it is.')),
-        [['Cancel', false], ['Join and export', true, true]]);
-      if (!go) { if (made) await handle.remove?.().catch(() => {}); status(`Not exported. ${thin}`, true); return; }
-      status('Joining parts with a bridge...');
-      ({ tris, bridged } = await pool.call('kern', { type: 'flatten', parts: doc.parts, bridge: true }));
+        h('p', {}, 'Join them with a 0.2 mm wide bridge along where they touch? Only the exported file gets it; the model stays as it is. Or export it as it is.')),
+        [['Cancel', null], ['Export as it is', false], ['Join and export', true, true]]);
+      if (go === null) { if (made) await handle.remove?.().catch(() => {}); status('Export cancelled.'); return; }
+      if (go) {
+        status('Joining parts with a bridge...');
+        ({ tris, bridged } = await pool.call('kern', { type: 'flatten', parts: doc.parts, bridge: true }));
+      } else closedText = 'parts touching along an edge, as they are';
     }
-    ({ bytes } = await pool.call('io', { type: 'save', tris, fmt }, [tris.buffer]));
+    openParts = open || 0;
+    ({ bytes } = await pool.call('io', { type: 'save', tris, fmt, open: openParts }, [tris.buffer]));
   } catch (err) { if (made) await handle.remove?.().catch(() => {}); status(err.message, true); return; }
   if (handle) {
     try {
@@ -1133,8 +1492,8 @@ async function exportModel(pick = false) {
       await w.close();
       const buf = await (await handle.getFile()).arrayBuffer();
       const r = await pool.call('io', { type: 'check', name: handle.name, buf }, [buf]);
-      if (!r.report.watertight) { await handle.remove?.().catch(() => {}); status(`The exported file did not read back as a closed solid (${r.text}), so it was removed.`, true); return; }
-      status(`Exported ${home && !pick ? 'exports/' : ''}${handle.name}: one closed solid, ${count(r.report.triangles)} triangles, read back and checked${bridged ? `; bridged where parts touched (${bridged} edges)` : ''}.`);
+      if (!r.report.watertight && !openParts && closedText === 'one closed solid') closedText = r.text;
+      status(`Exported ${home && !pick ? 'exports/' : ''}${handle.name}: ${openParts ? `not closed (${openParts} part${openParts > 1 ? 's are' : ' is'} open, written as ${openParts > 1 ? 'they are' : 'it is'})` : closedText}, ${count(r.report.triangles)} triangles, read back and checked${bridged ? `; bridged where parts touched (${bridged} edges)` : ''}.`);
     } catch (err) { status(`Could not write the file: ${err.message}`, true); }
     return;
   }
@@ -1142,7 +1501,7 @@ async function exportModel(pick = false) {
   const a = h('a', { href: url, download: name });
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  status(`Exported ${name} to downloads: one closed solid, checked before writing.`);
+  status(`Exported ${name} to downloads: ${openParts ? `not closed (${openParts} part${openParts > 1 ? 's are' : ' is'} open, written as ${openParts > 1 ? 'they are' : 'it is'})` : closedText}, checked before writing.`);
 }
 
 // ---- keys -------------------------------------------------------------------------------------
@@ -1157,6 +1516,10 @@ function zoom(f) {
   viewer.request();
 }
 
+window.addEventListener('keyup', e => {
+  // letting go of R hides the rings again, unless a turn is under way (that ends on release)
+  if (e.key.toLowerCase() === 'r' && ringsHeld) { ringsHeld = false; if (!hdrag) viewer.setRings(rotateOn); }
+});
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   const k = e.key.toLowerCase(), c = e.ctrlKey || e.metaKey, s = e.shiftKey;
@@ -1178,6 +1541,18 @@ window.addEventListener('keydown', e => {
   if (c && k === 'v') return act(paste);
   if (c && k === 'e') return act(() => exportModel(s));
   if (c && k === 'o') return act(openProject);
+  if (placing && k === 'enter') return act(() => commitPlace(true));
+  if (placing && k === 'escape') return act(cancelPlace);
+  if (viewer.pickingFace && k === 'escape') return act(() => { viewer.pickingFace = false; status('Slide cancelled.'); });
+  if (facePlane && sel.length === 1 && sel[0] === facePlane.id && k.startsWith('arrow')) return act(() => {
+    // slide along the face it was placed on (Ctrl: straight off or into it)
+    const d = moveStep * (s ? 10 : 1);
+    const { u, v, n } = { ...viewer.planeAxes(facePlane.n), n: facePlane.n };
+    const dir = c ? (k === 'arrowup' ? n : k === 'arrowdown' ? n.clone().negate() : null)
+      : { arrowright: u, arrowleft: u.clone().negate(), arrowup: v, arrowdown: v.clone().negate() }[k];
+    if (!dir) return;
+    doc.update([facePlane.id], `Slide ${doc.top(facePlane.id).name}`, p => { p.xform.pos = p.xform.pos.map((x, i) => +(x + dir.getComponent(i) * d).toFixed(6)); });
+  });
   if (c && (k === 'arrowup' || k === 'arrowdown')) return act(() => nudge(0, 0, (k === 'arrowup' ? 1 : -1) * moveStep * (s ? 10 : 1)));
   if (c) return;
   if (k.startsWith('arrow')) return act(() => {
@@ -1189,7 +1564,8 @@ window.addEventListener('keydown', e => {
     nudge(dir[0] * d, dir[1] * d, 0);
   });
   if (k === 'delete' || k === 'backspace') return act(deleteSel);
-  if (k === 'escape') return act(() => { if (gridPop.style.display !== 'none') showGridPop(false); else if (step) cancelStep(); else if (past) endPast(); else setSel([]); });
+  if (k === 'escape') return act(() => { if (openMenu) closeMenus(); else if (gridPop.style.display !== 'none') showGridPop(false); else if (step) cancelStep(); else if (past) endPast(); else setSel([]); });
+  if (k === 'f' && s) return act(startSlidePick);
   if (k === 'f') return act(() => viewer.view(null, sel));
   if (k === 'h') return act(() => setHole(true));
   if (k === 's') return act(() => setHole(false));
@@ -1197,8 +1573,9 @@ window.addEventListener('keydown', e => {
   if (k === 'm') return act(() => mirrorSel(s ? 1 : e.altKey ? 2 : 0));
   if (k === '+' || k === '=') return act(() => zoom(0.8));
   if (k === '-' || k === '_') return act(() => zoom(1.25));
-  if (k === 'r' || k === 'n' || k === 'l' || k === 'c') {
-    const what = { r: 'Ruler', n: 'Notes', l: 'Align', c: 'Cruise' }[k];
+  if (k === 'r' && !c) return act(() => { if (!e.repeat) { ringsHeld = true; viewer.setRings(true); } });
+  if (k === 'n' || k === 'c') {
+    const what = { n: 'Notes', c: 'Cruise' }[k];
     return act(() => status(`${what} is not built yet.`));
   }
 });

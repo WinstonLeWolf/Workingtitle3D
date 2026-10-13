@@ -1,6 +1,9 @@
 // Small DOM helpers for panels. Tool plugins build their panel from these, so
 // every tool looks and behaves the same.
 
+/** Hover help for an element, shown only when tooltips are switched on. */
+export function tip(el, text) { el.dataset.tip = text; return el; }
+
 export function h(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {

@@ -9,7 +9,36 @@
 // Opening replays journal lines with seq > base, so a crash between writing project.json
 // and clearing the journal does not apply a step twice.
 
+import { zipStore, unzip } from './meshio.js';
+
 const COMPACT_EVERY = 200;
+
+// ---- one file -------------------------------------------------------------------------------
+// A .wt3d file is the project in one zip: project.json (parts as recipes, history) and
+// meshes/<id>.f32 (each stored mesh, raw float32, exactly as held). Nothing is re-tessellated
+// or rounded, so a part saved and opened again is the same part.
+export const PROJECT_EXT = '.wt3d';
+
+export function packProject(doc) {
+  const enc = new TextEncoder();
+  const entries = [['project.json', enc.encode(JSON.stringify({ ...doc.snapshot(), app: 'Workingtitle3D' }))]];
+  for (const [id, tris] of doc.blobs) entries.push([`meshes/${id}.f32`, new Uint8Array(tris.buffer, tris.byteOffset, tris.byteLength)]);
+  return zipStore(entries);
+}
+
+export async function unpackProject(buf, name = 'The project file') {
+  const files = await unzip(buf, true, name);
+  const json = files.find(([n]) => n === 'project.json');
+  if (!json) throw new Error(`${name} holds no project.`);
+  const snap = JSON.parse(new TextDecoder().decode(json[1]));
+  const blobs = new Map();
+  for (const [n, data] of files) {
+    const m = /^meshes\/(.+)\.f32$/.exec(n);
+    if (m) blobs.set(m[1], new Float32Array(data.slice().buffer));
+  }
+  for (const id of snap.blobs || []) if (!blobs.has(id)) throw new Error(`${name} is missing a mesh (${id}).`);
+  return { snap, blobs };
+}
 
 async function readText(dir, name) {
   try { return await (await (await dir.getFileHandle(name)).getFile()).text(); } catch { return null; }

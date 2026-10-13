@@ -237,6 +237,15 @@ export class Doc {
     return out;
   }
 
+  /** Parts from another project (a .wt3d), added as one step with fresh ids. */
+  importParts(parts, blobs, label) {
+    for (const [id, tris] of blobs) if (!this.blobs.has(id)) { this.blobs.set(id, tris); this.emit({ type: 'blob', id, tris }); }
+    const reid = p => ({ ...p, id: this.newId(), children: p.children?.map(reid) });
+    const out = [];
+    this.commit(label, list => { for (const p of parts) { const c = reid(clone(p)); list.push(c); out.push(c.id); } });
+    return out;
+  }
+
   // ---- saving -----------------------------------------------------------------------------
   /** The whole state as plain data (blobs listed by id; their bytes are stored separately). */
   snapshot() {

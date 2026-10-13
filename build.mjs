@@ -1,4 +1,4 @@
-// Builds dist/Workingtitle3D.html: one self-contained file, double-click to run, offline.
+// Builds Workingtitle3D.html: one self-contained file, double-click to run, offline.
 // The worker is bundled first and handed to the main bundle as a string.
 // Every folder in src/tools/ is a plugin: index.js (panel, main thread) and
 // compute.js (worker). Both lists are generated, so a new tool is a new folder.
@@ -8,7 +8,7 @@ import path from 'node:path';
 
 const root = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const src = path.join(root, 'src');
-const out = path.join(root, 'dist', 'Workingtitle3D.html');
+const out = path.join(root, 'Workingtitle3D.html');
 const watch = process.argv.includes('--watch');
 
 function toolIds() {
@@ -60,7 +60,7 @@ async function build() {
     .replace('</body>', () => `<script type="text/plain" id="licences">\n${legal}</script>\n</body>`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html);
-  console.log(`dist/Workingtitle3D.html  ${(html.length / 1024).toFixed(0)} KB  ${Date.now() - t0} ms  tools: ${toolIds().join(', ')}`);
+  console.log(`Workingtitle3D.html  ${(html.length / 1024).toFixed(0)} KB  ${Date.now() - t0} ms  tools: ${toolIds().join(', ')}`);
 }
 
 try {

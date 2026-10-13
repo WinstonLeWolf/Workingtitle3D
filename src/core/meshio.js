@@ -200,18 +200,18 @@ export function writeMesh(tris, fmt) {
 }
 
 // ---- zip --------------------------------------------------------------------------
-async function unzip(buf) {
+export async function unzip(buf, all = false, what = 'The 3MF file') {
   const u8 = new Uint8Array(buf), dv = new DataView(buf);
   let e = -1;
   for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
     if (dv.getUint32(i, true) === 0x06054b50) { e = i; break; }
   }
-  if (e < 0) throw new ToolError('The 3MF file is not a readable zip.');
+  if (e < 0) throw new ToolError(`${what} is not a readable zip.`);
   const count = dv.getUint16(e + 10, true);
   let p = dv.getUint32(e + 16, true);
   const files = [];
   for (let k = 0; k < count; k++) {
-    if (dv.getUint32(p, true) !== 0x02014b50) throw new ToolError('The 3MF zip directory is damaged.');
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new ToolError(`${what}: its zip directory is damaged.`);
     const method = dv.getUint16(p + 10, true);
     const csize = dv.getUint32(p + 20, true);
     const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
@@ -220,10 +220,10 @@ async function unzip(buf) {
     p += 46 + nlen + xlen + clen;
     const start = loc + 30 + dv.getUint16(loc + 26, true) + dv.getUint16(loc + 28, true);
     const raw = u8.subarray(start, start + csize);
-    if (!name.toLowerCase().endsWith('.model')) { files.push([name, raw]); continue; }
+    if (!all && !name.toLowerCase().endsWith('.model')) { files.push([name, raw]); continue; }
     if (method === 0) files.push([name, raw]);
     else if (method === 8) files.push([name, await inflate(raw)]);
-    else throw new ToolError(`The 3MF file uses zip method ${method}, which this cannot read.`);
+    else throw new ToolError(`${what} uses zip method ${method}, which this cannot read.`);
   }
   return files;
 }
@@ -245,7 +245,7 @@ function crc32(u8) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function zipStore(entries) {
+export function zipStore(entries) {
   const enc = new TextEncoder();
   const parts = [], central = [];
   let off = 0;

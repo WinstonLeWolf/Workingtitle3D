@@ -9,13 +9,15 @@
 // Results are cached by recipe key, so moving one part never rebuilds another.
 import Module from 'manifold-3d';
 import { Matrix4, Euler, Quaternion, Vector3 } from 'three';
-import { weld, report, ToolError } from './meshcheck.js';
+import { weld, report, volume, flipAll, repair, bounds, WELD, ToolError } from './meshcheck.js';
+import { solidify } from './solidify.js';
+import { decimate } from './decimate.js';
 
-let M = null;
+let M = null, starting = null;
 export async function initKernel(wasmBinary) {
-  if (M) return;
-  M = await Module({ wasmBinary });
-  M.setup();
+  // one engine per worker: two jobs arriving together must not each start their own
+  starting ||= Module({ wasmBinary }).then(m => { m.setup(); M = m; });
+  return starting;
 }
 
 // ---- recipe keys -------------------------------------------------------------------------
@@ -29,7 +31,7 @@ function remember(key, man) {
   while (cache.size > CACHE_MAX) {
     const [k, m] = cache.entries().next().value;
     cache.delete(k);
-    m.delete();
+    m.man?.delete();
   }
 }
 
@@ -124,8 +126,34 @@ export function toManifold(tris) {
   try {
     return M.Manifold.ofMesh(mesh);
   } catch {
-    throw new ToolError('That mesh is not a closed solid, so it cannot be joined or cut.');
+    throw new ToolError('An imported mesh is not a closed solid, so it cannot be joined, cut or given a step. It can still be moved and viewed.');
   }
+}
+
+/** Join closed shells into one solid. Shells that will not close are left out; says how many. */
+export function unionShells(list) {
+  const mans = [];
+  let dropped = 0;
+  for (const t of list) {
+    try { mans.push(toManifold(t)); } catch { dropped++; }
+  }
+  if (!mans.length) return null;
+  let man = mans.length === 1 ? mans[0] : M.Manifold.union(mans);
+  let tris = toTris(man), bridged = 0;
+  const rep = report(tris);
+  if (!rep.watertight && rep.overEdges.length) {
+    // shells that only touch along an edge: the same thin bridge the export offers
+    const r = BRIDGE, around = (x, y, z) => [[x - r, y, z], [x + r, y, z], [x, y - r, z], [x, y + r, z], [x, y, z - r], [x, y, z + r]];
+    const bridges = rep.overEdges.map(e => M.Manifold.hull([...around(e[0], e[1], e[2]), ...around(e[3], e[4], e[5])]));
+    const fused = M.Manifold.union([man, ...bridges]);
+    tris = toTris(fused);
+    bridged = bridges.length;
+    for (const b of bridges) b.delete();
+    fused.delete();
+  }
+  for (const x of mans) if (x !== man) x.delete();
+  man.delete();
+  return { tris, dropped, bridged };
 }
 
 export function toTris(man) {
@@ -140,52 +168,129 @@ export function toTris(man) {
 }
 
 // ---- building ----------------------------------------------------------------------------------
+// A part's shape is { man, soup }: man a closed Manifold (or null), soup the triangles of
+// anything that is not a closed solid (or null), both in the part's own frame. STLs are
+// often not closed and some never will be; such a part still shows, moves, groups and
+// exports as it is. A step that needs a solid (cutting, intersecting, hollowing, edge
+// shaping) closes it for that step and says how.
+
 /**
- * The part's shape in its own frame, as a Manifold owned by the cache (do not delete it).
- * ctx: { blobs: Map(id -> Float32Array), tools: {id: {run}}, progress }
+ * The part's shape in its own frame, owned by the cache (do not delete it).
+ * ctx: { blobs: Map(id -> Float32Array), tools: {id: {run}}, progress, notes }
  */
 export async function local(part, ctx) {
   const key = shapeKey(part);
   const hit = cache.get(key);
   if (hit) { cache.delete(key); cache.set(key, hit); return hit; }
-  let man;
+  const note = t => ctx.notes?.push(t);
+  let shape, skip = 0;
   if (part.kind === 'group') {
-    const solids = [], holes = [], owned = [];
+    const solids = [], holes = [], owned = [], soups = [];
+    let soupHole = false;
     for (const c of part.children) {
       const base = await local(c, ctx);
-      const m = place(base, c.xform);
-      if (m !== base) owned.push(m);   // a placed copy is ours to free; the cached base is not
-      (c.hole ? holes : solids).push(m);
+      if (base.man) {
+        const m = place(base.man, c.xform);
+        if (m !== base.man) owned.push(m);   // a placed copy is ours to free; the cached base is not
+        (c.hole ? holes : solids).push(m);
+      }
+      if (base.soup) { soups.push({ tris: placeSoup(base.soup, c.xform), hole: !!c.hole, name: c.name }); if (c.hole) soupHole = true; }
     }
-    if (!solids.length) man = M.Manifold.union(holes);   // a group of holes is one hole
-    else if (part.mode === 'intersect') {
-      // keep only what every solid shares, then cut the holes
-      const s = M.Manifold.intersection(solids);
-      if (holes.length) { const h = M.Manifold.union(holes); man = s.subtract(h); s.delete(); h.delete(); } else man = s;
-    } else {
-      const s = M.Manifold.union(solids);
+    const cutting = holes.length || soupHole || part.mode === 'intersect';
+    if (cutting && soups.length) {
+      // cutting needs solids: close each open piece for this group
+      for (const s of soups) {
+        const m = closeSoup(s.tris, s.name, ctx);
+        owned.push(m);
+        (s.hole ? holes : solids).push(m);
+      }
+      soups.length = 0;
+    }
+    let man = null;
+    if (!solids.length && holes.length) man = M.Manifold.union(holes);   // a group of holes is one hole
+    else if (solids.length) {
+      const s = part.mode === 'intersect' ? M.Manifold.intersection(solids) : M.Manifold.union(solids);
       if (holes.length) { const h = M.Manifold.union(holes); man = s.subtract(h); s.delete(); h.delete(); } else man = s;
     }
     for (const m of owned) m.delete();
-    const t = tidy(man);
-    if (t !== man) { man.delete(); man = t; }
+    if (man) { const t = tidy(man); if (t !== man) { man.delete(); man = t; } }
+    shape = { man, soup: soups.length ? concat(soups.map(s => s.tris)) : null };
   } else if (part.kind === 'mesh') {
-    const tris = ctx.blobs.get(part.blob);
+    let tris = ctx.blobs.get(part.blob);
     if (!tris) throw new ToolError(`The mesh for ${part.name || 'a part'} is missing from the project.`);
-    man = toManifold(tris);
-  } else man = primitive(part.kind, part.params);
-  for (const op of part.ops || []) {
+    // a first step that works on the file as read (repair) gets the raw triangles
+    const first = part.ops?.[0] && ctx.tools[part.ops[0].tool];
+    if (first?.raw) {
+      const out = await first.run(tris, part.ops[0].params, { selection: [], progress: ctx.progress || (() => {}), kernel: { M, toManifold, toTris } });
+      if (out.notes) for (const t of out.notes) note(t);
+      tris = out.tris || out;
+      skip = 1;
+    }
+    shape = asShape(tris);
+  } else shape = { man: primitive(part.kind, part.params), soup: null };
+  for (const op of (part.ops || []).slice(skip)) {
     const tool = ctx.tools[op.tool];
     if (!tool) throw new ToolError(`No tool called ${op.tool}.`);
-    const tris = toTris(man);
+    let tris;
+    if (shape.soup && !tool.openOk) {
+      // this step needs a solid
+      const m = closeSoup(shapeTris(shape), part.name, ctx);
+      freeShape(shape);
+      shape = { man: m, soup: null };
+    }
+    tris = shapeTris(shape);
     const sel = op.sel?.segs ? op.sel : resolveFace(tris, op.sel);   // picked edges travel as plan segments
     const out = await tool.run(tris, op.params, { selection: sel, progress: ctx.progress || (() => {}), kernel: { M, toManifold, toTris } });
-    const next = toManifold(out.tris || out);
-    man.delete();
-    man = next;
+    if (out.notes) for (const t of out.notes) note(t);
+    freeShape(shape);
+    shape = asShape(out.tris || out);
   }
-  remember(key, man);
-  return man;
+  remember(key, shape);
+  return shape;
+}
+
+/** Put a shape the page already holds back in the cache (a fresh modeller after a restart). */
+export function seed(key, tris) {
+  if (!cache.has(key)) remember(key, asShape(tris));
+}
+
+/** Triangles to a shape: a closed solid when they make one, else kept as they are. */
+function asShape(tris) {
+  if (report(tris).watertight) {
+    try { return { man: toManifold(tris), soup: null }; } catch { /* fall through: keep as is */ }
+  }
+  return { man: null, soup: tris };
+}
+function shapeTris(shape) {
+  const parts = [];
+  if (shape.man) parts.push(toTris(shape.man));
+  if (shape.soup) parts.push(shape.soup);
+  return parts.length === 1 ? parts[0] : concat(parts);
+}
+function freeShape(shape) { shape.man?.delete(); }
+
+/** Close an open surface for a step that needs a solid: repair first, and if that cannot,
+ *  rebuild it on a grid fine enough for its size. */
+function closeSoup(tris, name, ctx) {
+  const r = repair(tris, WELD, { gap: 0.01 });
+  if (r.fixes.after.watertight) {
+    try { const m = toManifold(r.tris); ctx.notes?.push(`${name || 'A part'} was not closed: repaired for this step.`); return m; } catch { /* rebuild */ }
+  }
+  const b = bounds(tris);
+  const size = Math.max(b.hi[0] - b.lo[0], b.hi[1] - b.lo[1], b.hi[2] - b.lo[2]);
+  const h = Math.min(1, Math.max(0.1, Math.round(size / 300 * 20) / 20));
+  const solid = decimate(solidify(tris, h).tris, { target: 0, tol: 0.01 }).tris;
+  ctx.notes?.push(`${name || 'A part'} was not closed: rebuilt as a solid on a ${h} mm grid for this step. Repair with Make solid sets the grid.`);
+  return toManifold(solid);
+}
+
+/** Soup in a part's own frame to its parent's frame; a mirror turns faces back out. */
+function placeSoup(tris, xform) {
+  if (isIdentity(xform)) return tris;
+  const t = tris.slice(), m4 = matrix(xform), v = new Vector3();
+  for (let i = 0; i < t.length; i += 3) { v.set(t[i], t[i + 1], t[i + 2]).applyMatrix4(m4); t[i] = v.x; t[i + 1] = v.y; t[i + 2] = v.z; }
+  if (m4.determinant() < 0) flipAll(t);
+  return t;
 }
 
 /** A stored face pick ({normal, d, point}) back to triangle indices on this mesh: the flat
@@ -226,28 +331,36 @@ export function resolveFace(tris, sel) {
   return out;
 }
 
-/** Display mesh for a part, in its own frame. */
+/** Display mesh for a part, in its own frame. open: some of it is not a closed solid. */
 export async function partMesh(part, ctx) {
-  const man = await local(part, ctx);
-  const tris = toTris(man);
-  return { key: shapeKey(part), tris, volume: man.volume() };
+  const shape = await local(part, ctx);
+  const tris = shapeTris(shape);
+  const vol = (shape.man ? shape.man.volume() : 0) + (shape.soup ? Math.abs(volume(shape.soup)) : 0);
+  return { key: shapeKey(part), tris: tris === shape.soup ? tris.slice() : tris, volume: vol, open: !!shape.soup };
 }
 
-/** Everything solid and visible at the top level, joined into one closed solid in world space.
- *  Loose holes (not in a group) cut nothing, as on the plate. */
-/** Every top-level visible solid joined into one. With opts.bridge, pieces that only touch
- *  along an edge (a wall of zero thickness) get a thin bridge along that edge so the result is
- *  one closed solid; opts.bridged says how many edges. The parts themselves are not changed. */
+/** Every top-level visible solid joined into one, in world space. Loose holes (not in a
+ *  group) cut nothing, as on the plate. Open surfaces are written as they are beside the
+ *  joined solid; opts.open says how many parts had one. With opts.bridge, pieces that only
+ *  touch along an edge (a wall of zero thickness) get a thin bridge along that edge so the
+ *  result is one closed solid; opts.bridged says how many edges. The parts are not changed. */
 export async function flatten(parts, ctx, opts = {}) {
-  const placed = [], owned = [];
+  const placed = [], owned = [], loose = [];
   for (const p of parts) {
     if (p.hole || p.hidden) continue;
     const base = await local(p, ctx);
-    const m = place(base, p.xform);
-    if (m !== base) owned.push(m);
-    placed.push(m);
+    if (base.man) {
+      const m = place(base.man, p.xform);
+      if (m !== base.man) owned.push(m);
+      placed.push(m);
+    }
+    if (base.soup) loose.push(placeSoup(base.soup, p.xform));
   }
-  if (!placed.length) throw new ToolError('Nothing solid to save.');
+  opts.open = loose.length;
+  if (!placed.length) {
+    if (!loose.length) throw new ToolError('Nothing solid to save.');
+    return concat(loose);
+  }
   const joined = M.Manifold.union(placed);
   const all = tidy(joined);
   let tris = toTris(all);
@@ -267,10 +380,17 @@ export async function flatten(parts, ctx, opts = {}) {
   all.delete();
   if (joined !== all) joined.delete();
   for (const m of owned) m.delete();
-  return tris;
+  return loose.length ? concat([tris, ...loose]) : tris;
+}
+
+function concat(list) {
+  const out = new Float32Array(list.reduce((n, t) => n + t.length, 0));
+  let k = 0;
+  for (const t of list) { out.set(t, k); k += t.length; }
+  return out;
 }
 
 export function clearCache() {
-  for (const m of cache.values()) m.delete();
+  for (const m of cache.values()) m.man?.delete();
   cache.clear();
 }
