@@ -1411,8 +1411,6 @@ async function importFiles(files) {
         const ids = doc.importParts(snap.parts, blobs, `Import ${file.name}`);
         setSel(ids);
         status(`Imported ${ids.length} part${ids.length === 1 ? '' : 's'} from ${file.name}.`);
-        await refresh();   // the new part's mesh first, so the view frames it
-        viewer.view('iso');
       } catch (err) { status(`${file.name}: ${err.message}`, true); }
       continue;
     }
@@ -1436,8 +1434,6 @@ async function importFiles(files) {
       const f = r.fixes;
       const fixed = [f.degenerate && `${f.degenerate} zero-area dropped`, f.duplicates && `${f.duplicates} duplicates dropped`, f.tjunctions && `${f.tjunctions} T-junctions split`, f.holes && `${f.holes} holes filled`, f.reoriented && `${f.reoriented} faces re-wound`, f.flipped && 'turned right way out', f.shells > 1 && `${f.shells} shells joined`, f.droppedShells && `${f.droppedShells} unclosable shells left out`, f.bridged && `${f.bridged} touching edges bridged 0.2 mm wide`].filter(Boolean);
       status(`Imported ${file.name}${fixed.length ? ' (' + fixed.join(', ') + ')' : ''}.${open}`);
-      await refresh();   // the new part's mesh first, so the view frames it
-      viewer.view('iso');
     } catch (err) { status(`${file.name}: ${err.message}`, true); }
   }
 }
