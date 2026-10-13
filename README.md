@@ -1,5 +1,6 @@
 # Workingtitle3D
-n![Workingtitle3D](box.png)
+
+![Workingtitle3D](box.png)
 
 A 3D modeller in one HTML file. It runs in your browser with the network unplugged. No
 account, no login, no upload, no telemetry. Your models never leave the machine.
