@@ -2,44 +2,59 @@
 
 ![Workingtitle3D](box.png)
 
-A 3D modeller in one HTML file. It runs in your browser with the network unplugged. No
-account, no login, no upload, no telemetry. Your models never leave the machine.
+Workingtitle3D is a new and yet familiar 3D modeler. Runs in your browser no network connection required. 
+No login, no telemetry. no forced cloud model inspection. Nothing leaves the machine. 
 
-It is new and it will have flaws. It is still better than most free modellers, and it does
-not hold your work hostage behind a sign-in.
+It's new and it will have flaws but it's stable enough and feature rich so it's already my daily driver.
+Designed with 3D printing as the primary goal your parts will snap to grid in even divisions of standard printer nozzle sizes (0.05mm is the exception), 
+this helps guide the user to design printer friendly models and that means later on having fewer rounding errors made by the slicer.
 
-There are no automatic or in-app updates, and there never will be. New tools and fixes
-arrive as new versions here, so check back now and then. Tools get added as they are
-needed, so the list below keeps growing.
+Did i mention its free? Now and for as long as it exists no sub, no paid anything ever. 
+The whole app lives in an HTML page you can edit and add anything you want to it. 
+
+Dedicated add-on module tab is coming so you'll be able to add custom shape tools and share them with each other easily.
+
+There are no automatic or in-app updates. New tools and fixes arrive as new versions, check back often until i add the menu item "check for updates",
+which will display any newer version then the current and change logs so you dont have to leave the app to see whats new. 
+
+As for those tools and features if you find its missing something commonly used in 3D modeling and you think its a good fit here, 
+submit a request and it likely will be there for the next update. 
+
+I'm just one Man and a silly coding bot in a trenchcoat. If you vehemently hate ai code thats fine, 
+don't use it and really don't feel obligated to tell me or anyone else just go enjoy your day. 
 
 ## Features
-
 - Shapes, holes, groups and intersects, joined with exact mesh booleans
   (https://github.com/elalish/manifold).
+  
 - New shapes follow the pointer and sit flat on whatever face they land on. Parts stay on a
-  0.05 mm lattice, so parts that meet really meet.
-- Every part keeps its recipe. Change a hole after grouping it and the group rebuilds.
-- Roll back one part and leave the rest alone.
-- Imports STL, 3MF and OBJ, repaired on the way in. A mesh that still is not closed loads
-  anyway and works: it moves, groups and exports as it is, and Show faults marks where it
-  is open.
-- Repair: weld gaps, fill holes, or rebuild the mesh as one solid on a grid you choose.
-- Simplify: fewer triangles and a smaller file, held within a distance you set of the
-  original surface (0.01 mm by default). The panel shows the STL size before you commit.
-- Edge shaper (fillet, chamfer, cove on flat parts) and Hollow, optionally opened through a
+  0.05 mm lattice, so parts that meet really meet and you don't end up with un-joined slivers.
+  
+- Parametric: Change a hole after grouping it and the group rebuilds. Every part keeps its recipe.
+- Undo: Roll back a single part of a group and it rebuilds the group with the updated shape (feature not seen before) one part and leave the rest alone.
+- Supports STL, 3MF and OBJ, repaired automagically during import. Repairing does not always fully close a mesh but,
+- it load the model in anyway and you can continue on no complaints no forced repair first. Export has its own set of repair options,
+- which will(should) take care of any remaining manifold issues.
+- 
+- "Show faults": check box lets you see where model defects are by highlighting them.
+- Repair: weld gaps, fill holes, or rebuild the mesh as one solid.
+- Simplify: Quadratic edge collapse decimation with topology preserve, fewer triangles and a smaller file.
+- Edge shaper: fillet, chamfer, cove on flat parts.
+- Hollow, optionally opened through a
   face.
 - Save file writes the whole project as one .wt3d file. Parts stay editable, imported meshes
   stay exact, so nothing degrades on a round trip the way it does through STL.
-- Color schemes and tooltips in the View menu. Nothing in the interface is told apart by hue
-  alone. See ACCESSIBILITY.md.
+- tooltips: View menu - toggle tooltips, Helpful messages when you hover oven an item to help you get started without RTFM.
+- Interface Theme: includes multiple color scheme presets to help with different types of colorblindness. Rememeber its HTML,
+- you can make your own color scheme to suite your needs very easily amd submit it to be added officially. See ACCESSIBILITY.md.
 
 ## Run
+Download the latest release - open Workingtitle3D.html in a Chromium-based browser (Chromium itself is preferred,
+Vivaldi and Brave also good options). There is no install no bloat. Firefox is not supported due to how it handles file saving,
+it requires a workaround which would in turn break for chromium.
 
-Download Workingtitle3D.html from Releases and open it in a Chromium-based browser (Edge,
-Vivaldi, Chromium, Brave). That is the whole install. Firefox is not supported.
-
-Brave keeps folder access switched off. Turn on brave://flags/#file-system-access-api to have
-projects saved to a folder as you work, or use Save file, which works either way.
+Brave keeps folder access switched off by default. to enable open this, in brave address bar go to - brave://flags/#file-system-access-api and enable,
+This allows autosaving and believe me you want that, you can instead manually save its an option you are not forced to enable anything.
 
 To build it yourself:
 
@@ -47,7 +62,6 @@ To build it yourself:
     npm run build
 
 ## Keys
-
 | Key | Action |
 |---|---|
 | Right drag / middle drag / wheel | orbit / pan / zoom to the pointer |
@@ -72,7 +86,6 @@ To build it yourself:
 | Delete, Esc | delete, clear selection |
 
 ## Tests
-
     node tests/kernel.mjs         shapes, groups, tool steps, joined export
     node tests/doc.mjs            history, rollback, project folder, crash recovery
     node tests/tools_repair.mjs   repair, make solid, open meshes in groups and cuts
@@ -83,19 +96,17 @@ To build it yourself:
 The two browser tests need PUPPETEER_DIR and CHROME_DIR set.
 
 ## Licence
-
-Source-available: Apache License 2.0 with the Commons Clause. Use it for anything,
-commercial work included. The models you make are yours to sell. Fork it with credit under
-the same terms. Do not sell it or a fork of it. Full terms in LICENSE.
+Source-available: Apache License 2.0 with the Commons Clause. Use it for personal and
+commercial work alike. The models you make are yours alone to keep, sell or otherwise do as you please. 
+Forking and making derivatives does not give you any right to sell this software or any derivative, add any paid subscriptions or features. 
+Workingtitle3D is free, forever. Full terms in LICENSE.
 
 Bundled libraries keep their own licences (MIT, Apache-2.0, ISC, Boost 1.0), listed in
 THIRD-PARTY-NOTICES.txt and carried inside the built HTML file.
 
 ## Acknowledgements
-
 Designed by Bootdsc, encabulated by Claude.
 
 ## Cyberdeck Cafe
-
-Built at the Cyberdeck Cafe. Neon City Mix and the rest of the crew:
+Built at the Cyberdeck Cafe Workshop.
 https://cyberdeck.cafe/
