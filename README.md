@@ -93,7 +93,7 @@ THIRD-PARTY-NOTICES.txt and carried inside the built HTML file.
 
 ## Acknowledgements
 
-Written with Claude (Anthropic) and Grok (xAI).
+Designed by Bootdsc, encabulated by Claude.
 
 ## Cyberdeck Cafe
 
