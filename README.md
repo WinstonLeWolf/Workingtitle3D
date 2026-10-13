@@ -106,7 +106,4 @@ THIRD-PARTY-NOTICES.txt and carried inside the built HTML file.
 
 ## Acknowledgements
 Designed by Bootdsc, encabulated by Claude.
-
-## Cyberdeck Cafe
-Built at the Cyberdeck Cafe Workshop.
-https://cyberdeck.cafe/
+Built at the Cyberdeck Cafe Workshop. https://cyberdeck.cafe/
