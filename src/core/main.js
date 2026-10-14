@@ -41,8 +41,9 @@ const colorName = hex => (COLORS.find(c => c[1].toLowerCase() === (hex || '').to
 
 /** Color row: swatch + name, opens a named palette with a hex field. */
 function colorPicker(current, onpick) {
-  const swatch = h('span', { class: 'swatch' + (current ? '' : ' none'), style: current ? `background:${current}` : '' });
-  const label = h('span', { class: 'cname' }, colorName(current));
+  const togglePalette = () => { paletteOpen = !paletteOpen; grid.style.display = paletteOpen ? '' : 'none'; };
+  const swatch = h('span', { class: 'swatch' + (current ? '' : ' none'), style: (current ? `background:${current};` : '') + 'cursor:pointer', title: 'Click to choose color', onclick: togglePalette });
+  const label = h('span', { class: 'cname', style: 'cursor:pointer', title: 'Click to choose color', onclick: togglePalette }, colorName(current));
   const grid = h('div', { class: 'palette', style: paletteOpen ? '' : 'display:none' });
   for (const [name, hex] of COLORS) {
     grid.append(h('button', { type: 'button', class: 'sw' + (hex === (current || '') ? ' on' : '') + (hex ? '' : ' none'), title: name,
@@ -52,7 +53,7 @@ function colorPicker(current, onpick) {
   hexIn.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') hexIn.blur(); });
   hexIn.addEventListener('change', () => { const v = hexIn.value.trim(); if (/^#?[0-9a-f]{6}$/i.test(v)) onpick((v[0] === '#' ? v : '#' + v).toLowerCase()); else hexIn.classList.add('bad'); });
   grid.append(h('div', { class: 'hexrow' }, 'Hex', hexIn));
-  const toggle = button('Color', () => { paletteOpen = !paletteOpen; grid.style.display = paletteOpen ? '' : 'none'; }, { small: true });
+  const toggle = button('Color', togglePalette, { small: true });
   return h('div', {}, h('div', { class: 'colorrow' }, swatch, label, toggle), grid);
 }
 
