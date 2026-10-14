@@ -26,6 +26,17 @@ export function profilePoints(kind, w, h, n = 90) {
 export function levels(p, thickness) {
   const { width: w, height: h } = p;
   const zs = startFor(p, thickness);
+  if (p.kind === 'chamfer') {
+    // A chamfer is a straight bevel: at most steps of 0.5mm across the width, not 90 concentric rings
+    const k = Math.max(1, Math.ceil(w / 0.5));
+    const out = [];
+    for (let j = 0; j <= k; j++) {
+      const d = (w * j) / k;
+      out.push([d, zs + (h * j) / k]);
+    }
+    const snap = z => { z = Math.min(Math.max(z, LAND), thickness); return thickness - z < 1e-9 ? thickness : z; };
+    return out.map(([d, z]) => [d, snap(z)]);
+  }
   const pts = profilePoints(p.kind, w, h);
   // no gap wider than RING_STEP in plan, so ridges on narrow strips come out true
   const fine = [pts[0]];
