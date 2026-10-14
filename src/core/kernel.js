@@ -132,8 +132,18 @@ function primitive(kind, p) {
       if (!sections.length) throw new ToolError('svg: SVG contains no filled areas.');
       let combined = sections.length === 1 ? sections[0] : CrossSection.union(sections);
       for (const cs of sections) if (cs !== combined) cs.delete();
-      const solid = Manifold.extrude(combined, h);
-      combined.delete();
+      let clean = combined;
+      try {
+        const simp = combined.simplify(0.05);
+        if (!simp.isEmpty()) {
+          combined.delete();
+          clean = simp;
+        } else {
+          simp.delete();
+        }
+      } catch { /* use combined if simplify throws */ }
+      const solid = Manifold.extrude(clean, h);
+      clean.delete();
       return solid;
     }
   }

@@ -38,8 +38,19 @@ export async function run(tris, p, ctx) {
   let combined = sections.length === 1 ? sections[0] : CrossSection.union(sections);
   for (const cs of sections) if (cs !== combined) cs.delete();
 
-  const solid = Manifold.extrude(combined, height);
-  combined.delete();
+  let clean = combined;
+  try {
+    const simp = combined.simplify(0.05);
+    if (!simp.isEmpty()) {
+      combined.delete();
+      clean = simp;
+    } else {
+      simp.delete();
+    }
+  } catch { /* use combined */ }
+
+  const solid = Manifold.extrude(clean, height);
+  clean.delete();
 
   const out = toTris(solid);
   solid.delete();

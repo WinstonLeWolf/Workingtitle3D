@@ -1004,6 +1004,8 @@ async function previewStep() {
   const p = doc.top(s.partId);
   const part = { ...p, ops: [...(p.ops || []), stepOp()] };
   s.ui.prog.style.display = '';
+  s.ui.applyBtn.disabled = true;
+  status(`${s.tool.title}: computing preview...`);
   try {
     await sendBlobs();
     const r = await pool.call('kern', { type: 'mesh', part }, [], (f, t) => { if (step === s && my === s.seq) { s.ui.prog.firstChild.style.width = `${Math.round(f * 100)}%`; status(`${s.tool.title}: ${t}...`); } });
@@ -1015,13 +1017,25 @@ async function previewStep() {
     status(`${s.tool.title}: preview ready. ${(r.notes || []).join(' ')} Apply keeps it.`);
   } catch (err) {
     if (step === s) { s.ui.statusEl.replaceChildren(errorLine(err.message)); status(err.message, true); }
-  } finally { if (step === s) s.ui.prog.style.display = 'none'; }
+  } finally {
+    if (step === s) {
+      s.ui.prog.style.display = 'none';
+      s.ui.applyBtn.disabled = !!stepProblem();
+    }
+  }
 }
 async function applyStep() {
   if (!step || stepProblem()) return;
   const s = step;
-  if (!s.previewed) await previewStep();
-  if (step !== s || !s.previewed) return;
+  if (!s.previewed) {
+    status(`${s.tool.title}: computing preview before applying...`);
+    await previewStep();
+  }
+  if (step !== s) return;
+  if (!s.previewed) {
+    status(`Cannot apply ${s.tool.title}: computation failed. Check settings or reduce radius.`, true);
+    return;
+  }
   const op = stepOp();
   const p = doc.top(s.partId);
   const pre = meshes.get('preview');

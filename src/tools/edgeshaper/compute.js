@@ -14,6 +14,7 @@ const CLEAN = 1.415;        // clipper units: drop points closer than this to th
 
 export async function run(tris, p, ctx) {
   if (p.edges && p.edges !== 'all') return picked(tris, p, ctx);
+  ctx?.progress?.(0.05, 'outline');
   const part = flatPart(tris);
   const t = part.z1 - part.z0;
   const bad = problem(p, t);
@@ -47,6 +48,7 @@ const LIFT = 1;   // mm the cutters reach past the treated face
 async function picked(tris, p, ctx) {
   const K = ctx.kernel;
   if (!K) throw new ToolError('Picked edges need the solid kernel.');
+  ctx?.progress?.(0.05, 'outline');
   const part = flatPart(tris);
   const t = part.z1 - part.z0;
   const bad = problem(p, t);
@@ -139,10 +141,66 @@ function flatPart(tris) {
   }
   // the plan is the union of the bottom face; the top face must match it
   const face = level => {
-    const paths = [];
+    const edgeMap = new Map();
     for (let i = 0; i < tris.length; i += 9) {
       if (Math.abs(tris[i + 2] - level) > tol || Math.abs(tris[i + 5] - level) > tol || Math.abs(tris[i + 8] - level) > tol) continue;
-      paths.push([0, 3, 6].map(k => ({ X: Math.round(tris[i + k] * S), Y: Math.round(tris[i + k + 1] * S) })));
+      const pts = [0, 3, 6].map(k => ({ X: Math.round(tris[i + k] * S), Y: Math.round(tris[i + k + 1] * S) }));
+      for (let e = 0; e < 3; e++) {
+        const p1 = pts[e], p2 = pts[(e + 1) % 3];
+        if (p1.X === p2.X && p1.Y === p2.Y) continue;
+        const k1 = p1.X + ',' + p1.Y, k2 = p2.X + ',' + p2.Y;
+        const undirected = k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1;
+        edgeMap.set(undirected, (edgeMap.get(undirected) || 0) + 1);
+      }
+    }
+    const boundaryEdges = [];
+    for (let i = 0; i < tris.length; i += 9) {
+      if (Math.abs(tris[i + 2] - level) > tol || Math.abs(tris[i + 5] - level) > tol || Math.abs(tris[i + 8] - level) > tol) continue;
+      const pts = [0, 3, 6].map(k => ({ X: Math.round(tris[i + k] * S), Y: Math.round(tris[i + k + 1] * S) }));
+      for (let e = 0; e < 3; e++) {
+        const p1 = pts[e], p2 = pts[(e + 1) % 3];
+        if (p1.X === p2.X && p1.Y === p2.Y) continue;
+        const k1 = p1.X + ',' + p1.Y, k2 = p2.X + ',' + p2.Y;
+        const undirected = k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1;
+        if (edgeMap.get(undirected) === 1) boundaryEdges.push([p1, p2]);
+      }
+    }
+    let paths = [];
+    if (boundaryEdges.length) {
+      const nextMap = new Map();
+      for (const [p1, p2] of boundaryEdges) {
+        const k1 = p1.X + ',' + p1.Y;
+        if (!nextMap.has(k1)) nextMap.set(k1, []);
+        nextMap.get(k1).push(p2);
+      }
+      const visited = new Set();
+      for (const [p1, p2] of boundaryEdges) {
+        const startKey = p1.X + ',' + p1.Y;
+        const edgeKey = startKey + '->' + p2.X + ',' + p2.Y;
+        if (visited.has(edgeKey)) continue;
+        visited.add(edgeKey);
+        const loop = [p1];
+        let curr = p2;
+        while (curr) {
+          const ck = curr.X + ',' + curr.Y;
+          if (ck === startKey) break;
+          loop.push(curr);
+          const nxtList = nextMap.get(ck) || [];
+          let found = null;
+          for (const nxt of nxtList) {
+            const ek = ck + '->' + nxt.X + ',' + nxt.Y;
+            if (!visited.has(ek)) { visited.add(ek); found = nxt; break; }
+          }
+          curr = found;
+        }
+        if (loop.length >= 3) paths.push(loop);
+      }
+    }
+    if (!paths.length) {
+      for (let i = 0; i < tris.length; i += 9) {
+        if (Math.abs(tris[i + 2] - level) > tol || Math.abs(tris[i + 5] - level) > tol || Math.abs(tris[i + 8] - level) > tol) continue;
+        paths.push([0, 3, 6].map(k => ({ X: Math.round(tris[i + k] * S), Y: Math.round(tris[i + k + 1] * S) })));
+      }
     }
     const c = new ClipperLib.Clipper();
     c.AddPaths(paths, ClipperLib.PolyType.ptSubject, true);
@@ -160,7 +218,7 @@ function flatPart(tris) {
   const diff = new ClipperLib.Paths();
   x.Execute(ClipperLib.ClipType.ctXor, diff, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
   const d = Math.abs(area(diff));
-  if (d > Math.max(1e-3 * a, 0.01)) {
+  if (d > Math.max(0.01 * a, 0.5)) {
     throw new ToolError(`Not a flat part: the top and bottom outlines differ by ${d.toFixed(2)} mm2, so the side walls are not straight up.`);
   }
   const region = toPolys(bottom, ClipperLib.PolyFillType.pftNonZero);
