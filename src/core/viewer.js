@@ -6,7 +6,12 @@
 // left drag on empty space draws a selection box.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import { faultEdges } from './meshcheck.js';
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const C = { bg: 0x0a0a0a, body: 0x9c9c9c, bodySel: 0xc8c8c8, inside: 0x2d5a2d, edge: 0x000000, edgeSel: 0x7dcf7d,
   hole: 0x8a8a8a, grid: 0x333333, gridMajor: 0x555555, plate: 0x111411, pick: 0x7dcf7d, box: 0x7dcf7d };
@@ -38,13 +43,27 @@ export class Viewer {
     // the wheel is ours: towards the point under the pointer, 5% of the way per notch but never
     // under 1 mm, so close up keeps a steady pace instead of crawling towards it for ever
     this.controls.enableZoom = false;
+    let lastWheelTime = 0, lastWheelPoint = null;
     dom.addEventListener('wheel', e => {
       e.preventDefault();
       const notches = Math.max(-5, Math.min(5, e.deltaY / 100));
       if (!notches) return;
-      const ray = this.ray(e).ray, h = this.hit(e);
-      let p = h ? h.point.clone() : null;
-      if (!p) { p = new THREE.Vector3(); if (!ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p) || p.distanceTo(this.camera.position) > 1e5) p = ray.at(this.camera.position.distanceTo(this.controls.target), new THREE.Vector3()); }
+      const now = performance.now();
+      let p = null;
+      if (now - lastWheelTime < 150 && lastWheelPoint) {
+        p = lastWheelPoint;
+      } else {
+        const ray = this.ray(e).ray, h = this.hit(e);
+        p = h ? h.point.clone() : null;
+        if (!p) {
+          p = new THREE.Vector3();
+          if (!ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p) || p.distanceTo(this.camera.position) > 1e5) {
+            p = ray.at(this.camera.position.distanceTo(this.controls.target), new THREE.Vector3());
+          }
+        }
+        lastWheelPoint = p;
+      }
+      lastWheelTime = now;
       const d = this.camera.position.distanceTo(p);
       let step = Math.max(d * 0.05, 1) * Math.abs(notches);
       if (notches < 0 && step > d - 0.5) step = Math.max(0, d - 0.5);   // stop half a millimetre short
@@ -177,6 +196,7 @@ export class Viewer {
   /** Nearest part under the pointer: {id, face (local triangle), point}. */
   hit(e) {
     const ray = this.ray(e);
+    ray.firstHitOnly = true;
     const meshes = [...this.objs.values()].filter(o => o.group.visible).map(o => o.mesh);
     const h = ray.intersectObjects(meshes, false).find(x => !(this.clipOn && this.clipPlane.distanceToPoint(x.point) < 0));
     return h ? { id: h.object.userData.id, face: h.faceIndex, point: h.point } : null;
@@ -283,6 +303,9 @@ export class Viewer {
     g.computeVertexNormals();
     g.computeBoundingBox();
     g.computeBoundingSphere();
+    if (m.tris.length > 300) {
+      try { g.computeBoundsTree(); } catch {}
+    }
     const group = new THREE.Group();
     const hole = !!p.hole;
     // each solid gets its own material so it can carry its own color
@@ -299,7 +322,7 @@ export class Viewer {
       group.add(edges);
     }
     this.root.add(group);
-    const o = { group, mesh, edges, body, key: m.key, tris: m.tris, hole, part: p };
+    const o = { group, mesh, edges, body, key: m.key, tris: m.tris, hole, part: p, worldBox: null, boxKey: null };
     if (this.faultsOn) this.addFaults(o);
     return o;
   }
@@ -333,7 +356,12 @@ export class Viewer {
   }
 
   drop(o) {
-    o.group.traverse(c => { if (c.geometry) c.geometry.dispose(); });
+    o.group.traverse(c => {
+      if (c.geometry) {
+        if (c.geometry.disposeBoundsTree) c.geometry.disposeBoundsTree();
+        c.geometry.dispose();
+      }
+    });
     o.body?.dispose();
     this.root.remove(o.group);
   }
@@ -343,6 +371,17 @@ export class Viewer {
     const r = (x?.rot || [0, 0, 0]).map(d => (d * Math.PI) / 180);
     obj.rotation.set(r[0], r[1], r[2], 'XYZ');
     obj.scale.set(...(x?.scale || [1, 1, 1]));
+    for (const o of this.objs.values()) if (o.group === obj) o.worldBox = null;
+  }
+
+  worldBox(o) {
+    if (!o.worldBox || o.boxKey !== o.key) {
+      o.group.updateMatrixWorld();
+      const bb = o.mesh.geometry.boundingBox;
+      o.worldBox = bb ? bb.clone().applyMatrix4(o.group.matrixWorld) : new THREE.Box3();
+      o.boxKey = o.key;
+    }
+    return o.worldBox;
   }
 
   /** History view: show these parts instead of the live scene, or null to go back.
@@ -551,7 +590,10 @@ export class Viewer {
     }
     if (!ids.length || this.ghost) { this.guides.visible = false; return; }
     const b = new THREE.Box3();
-    for (const id of ids) b.union(new THREE.Box3().setFromObject(this.objs.get(id).group));
+    for (const id of ids) {
+      const o = this.objs.get(id);
+      if (o) b.union(this.worldBox(o));
+    }
     const [hw, hd] = this.plateHalf || [300, 300], x0 = b.min.x, x1 = b.max.x, y0 = b.min.y, y1 = b.max.y;
     const a = this.guides.geometry.attributes.position.array;
     a.set([x0, y0, 0, x1, y0, 0, x1, y0, 0, x1, y1, 0, x1, y1, 0, x0, y1, 0, x0, y1, 0, x0, y0, 0,
@@ -566,7 +608,8 @@ export class Viewer {
     let inside = null;
     for (const [id, o] of this.objs) {
       if (o.hole || !o.group.visible || !o.body) continue;
-      if (!new THREE.Box3().setFromObject(o.group).containsPoint(cam)) continue;
+      const wb = this.worldBox(o);
+      if (!wb.containsPoint(cam)) continue;
       const rc = new THREE.Raycaster(cam.clone(), new THREE.Vector3(0.577, 0.577, 0.577));
       const exits = rc.intersectObject(o.group.children[1], false).length, entries = rc.intersectObject(o.mesh, false).length;
       if (exits > entries) { inside = id; break; }

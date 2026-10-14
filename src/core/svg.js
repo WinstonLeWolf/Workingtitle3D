@@ -40,6 +40,54 @@ function cleanLoop(pts, eps = 1e-5) {
   return out;
 }
 
+function sqDist(p1, p2) {
+  const dx = p1[0] - p2[0], dy = p1[1] - p2[1];
+  return dx * dx + dy * dy;
+}
+
+function sqDistToSeg(p, p1, p2) {
+  const l2 = sqDist(p1, p2);
+  if (l2 === 0) return sqDist(p, p1);
+  let t = ((p[0] - p1[0]) * (p2[0] - p1[0]) + (p[1] - p1[1]) * (p2[1] - p1[1])) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return sqDist(p, [p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])]);
+}
+
+function rdp(pts, eps) {
+  if (pts.length <= 2) return pts;
+  const eps2 = eps * eps;
+  function rec(pList) {
+    if (pList.length <= 2) return pList;
+    let dmax2 = 0, idx = 0;
+    const first = pList[0], last = pList[pList.length - 1];
+    for (let i = 1; i < pList.length - 1; i++) {
+      const d2 = sqDistToSeg(pList[i], first, last);
+      if (d2 > dmax2) { dmax2 = d2; idx = i; }
+    }
+    if (dmax2 > eps2) {
+      const left = rec(pList.slice(0, idx + 1));
+      const right = rec(pList.slice(idx));
+      return left.slice(0, -1).concat(right);
+    }
+    return [first, last];
+  }
+  return rec(pts);
+}
+
+export function simplifyLoop(pts, tol = 0.04) {
+  if (!pts || pts.length <= 4) return pts;
+  let maxD2 = 0, mid = Math.floor(pts.length / 2);
+  const p0 = pts[0];
+  for (let i = 1; i < pts.length; i++) {
+    const d2 = sqDist(p0, pts[i]);
+    if (d2 > maxD2) { maxD2 = d2; mid = i; }
+  }
+  const chain1 = rdp(pts.slice(0, mid + 1), tol);
+  const chain2 = rdp(pts.slice(mid).concat([pts[0]]), tol);
+  const combined = chain1.slice(0, -1).concat(chain2.slice(0, -1));
+  return combined.length >= 3 ? combined : pts;
+}
+
 /**
  * Parse SVG text into centered, sanitized polygon arrays suitable for Manifold CrossSection.
  * Each entry in polygons is an array of loops: [outerLoop, ...holeLoops], where each loop is [[x, y], ...].
@@ -115,6 +163,7 @@ export function parseSvgPolygons(svgText, opts = {}) {
   }
 
   const polygons = [];
+  const tol = opts.tol || 0.04;
   for (const s of rawShapes) {
     const outer = s.outer.map(([x, y]) => [
       +((x - cx) * scale).toFixed(5),
@@ -125,9 +174,12 @@ export function parseSvgPolygons(svgText, opts = {}) {
       +((y - cy) * scale).toFixed(5)
     ]));
 
+    const simpOuter = simplifyLoop(outer, tol);
+    const simpHoles = holes.map(h => simplifyLoop(h, tol));
+
     polygons.push([
-      ensureWinding(outer, true),
-      ...holes.map(h => ensureWinding(h, false))
+      ensureWinding(simpOuter, true),
+      ...simpHoles.map(h => ensureWinding(h, false))
     ]);
   }
 
