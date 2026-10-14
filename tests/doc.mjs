@@ -58,12 +58,24 @@ ok('rollback a: b untouched', d.top(b).hole === true);
 // groups
 const g = d.group([a, b]);
 ok('group of 2', d.parts.length === 1 && d.top(g).children.length === 2);
+
 d.update([g], 'Move group', p => { p.xform.pos = [5, 5, 0]; p.xform.rot = [0, 0, 90]; });
 const kids = d.ungroup(g);
 const ka = d.top(kids[0]);
 ok('ungroup keeps world placement', Math.abs(ka.xform.pos[0] - 5) < 1e-9 && Math.abs(ka.xform.pos[1] - 5) < 1e-9 && Math.abs(ka.xform.rot[2] - 90) < 1e-9, JSON.stringify(ka.xform));
 const dup = d.duplicate([kids[0]], [30, 0, 0]);
 ok('duplicate', d.parts.length === 3 && d.top(dup[0]).xform.pos[0] - ka.xform.pos[0] === 30 && dup[0] !== kids[0]);
+
+// svg part
+const svgId = d.add({ kind: 'svg', params: { height: 10, polygons: [[[[-10, -10], [10, -10], [10, 10], [-10, 10]]]] } }, 'Add SVG');
+d.update([svgId], 'Change SVG height', q => { q.params.height = 15; });
+ok('svg part in doc with height update', d.top(svgId).params.height === 15);
+d.undo();
+ok('undo svg height', d.top(svgId).params.height === 10);
+d.undo();
+ok('undo svg add', !d.parts.some(q => q.id === svgId));
+
+
 
 // project folder: write through, reopen, replay
 const dir = new FakeDir();

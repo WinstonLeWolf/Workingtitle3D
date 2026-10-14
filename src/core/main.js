@@ -10,6 +10,7 @@ import { Doc, shapeKey, IDENT, matrix } from './doc.js';
 import { Project, packProject, unpackProject, PROJECT_EXT } from './project.js';
 import * as folders from './folders.js';
 import { describe, weld } from './meshcheck.js';
+import { parseSvgPolygons } from './svg.js';
 
 const { h, button, seg, card, kv, errorLine, ask, mm, count } = ui;
 const SHAPES = {
@@ -22,7 +23,7 @@ const SHAPES = {
   tube: { d: 20, wall: 2, h: 20, sides: 64 },
   fillet: { r: 5, length: 20, sides: 64 },
 };
-const LABELS = { x: 'Width', y: 'Depth', z: 'Height', h: 'Height', d: 'Diameter', d1: 'Bottom diameter', d2: 'Top diameter',
+const LABELS = { x: 'Width', y: 'Depth', z: 'Height', h: 'Height', height: 'Height', d: 'Diameter', d1: 'Bottom diameter', d2: 'Top diameter',
   tube: 'Tube', wall: 'Wall', sides: 'Facets', tubeSides: 'Tube facets', r: 'Radius', length: 'Length' };
 const MOVE_STEPS = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 1, 5];
 let moveStep = 1;   // mm per arrow press, drag snap and size handle; picked bottom left of the view
@@ -130,7 +131,7 @@ let fileName = null;   // the .wt3d this doc came from or was last saved to
 
 // ---- layout -------------------------------------------------------------------------------
 const app = document.getElementById('app');
-const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf,.wt3d', multiple: true, style: 'display:none' });
+const importInput = h('input', { type: 'file', accept: '.stl,.obj,.3mf,.wt3d,.svg', multiple: true, style: 'display:none' });
 const projInput = h('input', { type: 'file', accept: '.wt3d', style: 'display:none' });
 const projLabel = h('button', { type: 'button', class: 'file', onclick: () => renameProject() });
 const projBtn = button('Save as project', () => pickProjectFolder(), { small: true });
@@ -261,10 +262,17 @@ const header = h('header', {},
   h('span', { class: 'popwrap' }, gridPop),
   h('span', { class: 'spacer' }), projLabel, reopenBtn, projBtn, importInput, projInput);
 
-const shapeGrid = h('div', { class: 'shapes' }, ...Object.keys(SHAPES).map(k => {
-  const b = button(k[0].toUpperCase() + k.slice(1), () => addShape(k), { title: `Add a ${k} on the plate` });
-  return b;
-}));
+const svgInput = h('input', { type: 'file', accept: '.svg', style: 'display:none' });
+svgInput.addEventListener('change', () => { if (svgInput.files?.[0]) importFiles([svgInput.files[0]]); svgInput.value = ''; });
+
+const shapeGrid = h('div', { class: 'shapes' },
+  ...Object.keys(SHAPES).map(k => {
+    const b = button(k[0].toUpperCase() + k.slice(1), () => addShape(k), { title: `Add a ${k} on the plate` });
+    return b;
+  }),
+  button('SVG', () => svgInput.click(), { title: 'Import and extrude an SVG as a 3D shape' }),
+  svgInput
+);
 const partList = h('div', { class: 'parts' });
 const stepCard = h('div');
 const inspector = h('div', { class: 'inspector', style: 'display:none' });
@@ -297,7 +305,7 @@ fold.onclick = () => {
 const aside = h('aside', {}, h('div', { class: 'tabrow' }, tabs, fold), panes.parts, panes.shapes);
 
 const view = h('div', { id: 'view' });
-const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF or OBJ here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
+const dropHint = h('div', { class: 'drop' }, h('b', {}, 'Add a shape, or drop an STL, 3MF, OBJ or SVG here'), 'Right drag orbits, middle drag pans, wheel zooms. Nothing leaves this computer.');
 let cutAxis = null, cutAt = 50;
 const cutRange = ui.slider('at', cutAt, '%', { min: 0, max: 100, step: 0.5, digits: 1 }, v => { cutAt = v; if (cutAxis) viewer.setClip(cutAxis, v / 100); });
 cutRange.classList.add('cut');
@@ -626,6 +634,7 @@ function renderInspector(live = null) {
   } else pastUi = null;
   if (p.params) {
     for (const [k, v] of Object.entries(p.params)) {
+      if (k === 'polygons') continue;
       const facets = k === 'sides' || k === 'tubeSides';
       body.push(ui.numfield(LABELS[k] || k, v, facets ? '' : 'mm', nv => upd(`${p.name}: ${(LABELS[k] || k).toLowerCase()} ${nv}`, q => { q.params[k] = facets ? Math.round(nv) : nv; }),
         { min: facets ? 3 : k === 'd2' || k === 'd1' ? 0 : 0.0001, step: facets ? 4 : 1, lazy: true, digits: facets ? 0 : 4 }));
@@ -835,6 +844,10 @@ function handleResult(d, h, e) {
   else if (kind === 'sphere') mul('d', 0);
   else if (kind === 'fillet') { mul('r', 0); mul('length', 1); }
   else if (kind === 'torus' && e.shiftKey) { mul('d', 0); mul('tube', 0); }
+  else if (kind === 'svg') {
+    if (i === 2) mul('height', 2);
+    else part.xform.scale = view.scale.map(v => +v.toFixed(6));
+  }
   else part.xform.scale = view.scale.map(v => +v.toFixed(6));   // meshes, groups, a torus pulled out of round
   const names = ['Width', 'Depth', 'Height'];
   return { part, view, same: Math.abs(k - 1) < 1e-9, label: `Size ${p.name}: ${e.shiftKey ? 'all' : names[i].toLowerCase()} ${mm(size)} mm`,
@@ -1411,6 +1424,22 @@ async function importFiles(files) {
         const ids = doc.importParts(snap.parts, blobs, `Import ${file.name}`);
         setSel(ids);
         status(`Imported ${ids.length} part${ids.length === 1 ? '' : 's'} from ${file.name}.`);
+      } catch (err) { status(`${file.name}: ${err.message}`, true); }
+      continue;
+    }
+    if (file.name.toLowerCase().endsWith('.svg')) {
+      try {
+        const text = await file.text();
+        const { polygons, width, depth } = parseSvgPolygons(text);
+        const name = file.name.replace(/\.[^.]+$/, '');
+        const id = doc.add({
+          kind: 'svg',
+          name,
+          params: { height: 10, polygons },
+          xform: defaultSpot()
+        }, `Import ${file.name}`);
+        setSel([id]);
+        status(`Imported ${file.name} (${width} x ${depth} mm, extruded 10 mm).`);
       } catch (err) { status(`${file.name}: ${err.message}`, true); }
       continue;
     }

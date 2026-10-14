@@ -62,6 +62,20 @@ export const SHAPES = {
   fillet: { r: 5, length: 20, sides: 64 },
 };
 
+function signedArea(pts) {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+  }
+  return a / 2;
+}
+
+function ensureWinding(pts, ccw = true) {
+  const isCCW = signedArea(pts) > 0;
+  return isCCW === ccw ? pts : pts.slice().reverse();
+}
+
 function primitive(kind, p) {
   const { Manifold, CrossSection } = M;
   const pos = v => { if (!(v > 0)) throw new ToolError(`${kind}: every size must be above zero.`); return v; };
@@ -104,6 +118,23 @@ function primitive(kind, p) {
       const r = outer.subtract(inner);
       outer.delete(); inner.delete();
       return r;
+    }
+    case 'svg': {
+      const h = pos(p.height || 10);
+      if (!p.polygons || !p.polygons.length) throw new ToolError('svg: no SVG geometry loaded.');
+      const sections = [];
+      for (const poly of p.polygons) {
+        const loops = poly.map((loop, i) => ensureWinding(loop, i === 0));
+        const cs = new CrossSection(loops);
+        if (!cs.isEmpty()) sections.push(cs);
+        else cs.delete();
+      }
+      if (!sections.length) throw new ToolError('svg: SVG contains no filled areas.');
+      let combined = sections.length === 1 ? sections[0] : CrossSection.union(sections);
+      for (const cs of sections) if (cs !== combined) cs.delete();
+      const solid = Manifold.extrude(combined, h);
+      combined.delete();
+      return solid;
     }
   }
   throw new ToolError(`No shape called ${kind}.`);

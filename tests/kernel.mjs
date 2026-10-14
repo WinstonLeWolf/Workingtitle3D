@@ -22,6 +22,26 @@ for (const kind of Object.keys(SHAPES)) {
   ok(`shape ${kind}`, r.watertight && Math.abs(b.lo[2]) < 1e-6, `${r.triangles} tris  ${describe(r)}  floor ${b.lo[2].toFixed(6)}  ${(performance.now() - t0).toFixed(1)} ms`);
 }
 
+// shape svg (extruded 2D profile with hole)
+{
+  const t0 = performance.now();
+  const svgPart = part('svg', {
+    height: 10,
+    polygons: [
+      [
+        [[-20, -20], [20, -20], [20, 20], [-20, 20]], // 40x40 outer
+        [[-5, -5], [5, -5], [5, 5], [-5, 5]] // 10x10 hole
+      ]
+    ]
+  });
+  const { tris } = await partMesh(svgPart, ctx);
+  const r = report(tris), b = bounds(tris);
+  const expectVol = (1600 - 100) * 10;
+  ok('shape svg', r.watertight && Math.abs(b.lo[2]) < 1e-6 && Math.abs(r.volume - expectVol) < 1e-3,
+    `${r.triangles} tris  ${describe(r)}  floor ${b.lo[2].toFixed(6)}  vol ${r.volume.toFixed(1)} vs ${expectVol}  ${(performance.now() - t0).toFixed(1)} ms`);
+}
+
+
 // a group: plate with a flush hole and a boss on top
 {
   const plate = part('box', { x: 40, y: 40, z: 5 });
@@ -50,6 +70,15 @@ for (const kind of Object.keys(SHAPES)) {
   const p = part('box', { x: 40, y: 20, z: 6 }, { ops: [{ tool: 'edgeshaper', params: { kind: 'fillet', face: 'top', width: 2, height: 2, start: null } }] });
   const r = report((await partMesh(p, ctx)).tris);
   ok('box + fillet step', r.watertight && r.volume < 4800, `${describe(r)} vol ${r.volume.toFixed(1)}`);
+  const svgFilleted = part('svg', {
+    height: 10,
+    polygons: [
+      [[[-20, -20], [20, -20], [20, 20], [-20, 20]]]
+    ]
+  }, { ops: [{ tool: 'edgeshaper', params: { kind: 'fillet', face: 'top', width: 2, height: 2, start: null } }] });
+  const rSvgF = report((await partMesh(svgFilleted, ctx)).tris);
+  ok('svg + fillet step', rSvgF.watertight && rSvgF.volume < 16000, `${describe(rSvgF)} vol ${rSvgF.volume.toFixed(1)}`);
+
   const h = part('box', { x: 40, y: 30, z: 20 }, { ops: [{ tool: 'hollower', params: { wall: 2, voxel: 0.5, open: true }, sel: { normal: [0, 0, 1], d: 20, point: [0, 0, 20] } }] });
   const t0 = performance.now();
   const rh = report((await partMesh(h, ctx)).tris);

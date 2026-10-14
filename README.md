@@ -28,14 +28,11 @@ don't use it and really don't feel obligated to tell me or anyone else just go e
   
 - Parametric: Change a hole after grouping it and the group rebuilds. Every part keeps its record.
 - Undo: Roll back a single part of a group and it rebuilds the group with the updated shape (feature not seen before) of the one part and leave the rest alone.
-- Supports STL, 3MF and OBJ, repaired automagically during import. Repairing does not always fully close a mesh but,
-- it'll load the model in anyway and you can continue on no complaints.
-- Export: has its own set of repair options, which will (should) take care of any remaining manifold issues.
-- 
+- Supports STL, 3MF, OBJ, and SVG. Drag-and-drop or use the "SVG" shape button to import 2D vector graphics, extrude them directly into watertight 3D solids, and adjust height or scale parametrically.
+- Edge shaper: fillet, chamfer, and cove on flats or extruded SVG profiles.
 - Show faults: check box lets you see where model defects are by highlighting them.
 - Repair: weld gaps, fill holes, or rebuild the mesh as one solid.
 - Simplify: Quadratic edge collapse decimation with topology preserve, fewer triangles and a smaller file.
-- Edge shaper: fillet, chamfer, cove on flats.
 - Hollow, optionally opened through a face.
 - Save file writes the whole project as one .wt3d file. Parts stay editable, imported meshes
   stay exact, so nothing degrades on a round trip the way it does witch a STL.

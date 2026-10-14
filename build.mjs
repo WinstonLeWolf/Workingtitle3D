@@ -60,7 +60,8 @@ async function build() {
     .replace('</body>', () => `<script type="text/plain" id="licences">\n${legal}</script>\n</body>`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html);
-  console.log(`Workingtitle3D.html  ${(html.length / 1024).toFixed(0)} KB  ${Date.now() - t0} ms  tools: ${toolIds().join(', ')}`);
+  fs.writeFileSync(path.join(root, 'index.html'), html);
+  console.log(`Workingtitle3D.html & index.html  ${(html.length / 1024).toFixed(0)} KB  ${Date.now() - t0} ms  tools: ${toolIds().join(', ')}`);
 }
 
 try {
